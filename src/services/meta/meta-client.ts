@@ -319,7 +319,7 @@ export async function uploadSendMedia(
   form.append("messaging_product", "whatsapp");
   form.append(
     "file",
-    new Blob([params.data], { type: params.mimeType }),
+    new Blob([params.data as unknown as BlobPart], { type: params.mimeType }),
     params.fileName,
   );
 
