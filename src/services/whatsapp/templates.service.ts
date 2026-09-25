@@ -101,7 +101,7 @@ export const createTemplateSchema = z.object({
         .regex(/^[a-z0-9_]+$/, "Name must be lowercase alphanumeric with underscores"),
     language: z.string().min(2).max(10),
     category: z.enum(["UTILITY", "MARKETING", "AUTHENTICATION"]),
-    headerFormat: z.enum(["TEXT", "IMAGE", "VIDEO", "DOCUMENT"]).optional(),
+    headerFormat: z.enum(["TEXT", "IMAGE", "VIDEO", "DOCUMENT", "NONE"]).optional(),
     headerText: z.string().max(60).optional(),
     // Media handle from POST /whatsapp/media/upload (required for IMAGE/VIDEO/DOCUMENT headers).
     headerHandle: z.string().min(1).max(512).optional(),
@@ -132,7 +132,8 @@ export type CreateTemplateInput = z.infer<typeof createTemplateSchema>;
 
 function buildCustomComponents(input: CreateTemplateInput): Array<Record<string, unknown>> {
     const components: Array<Record<string, unknown>> = [];
-    const headerFormat = input.headerFormat ?? (input.headerText ? "TEXT" : undefined);
+    const rawFormat = input.headerFormat ?? (input.headerText ? "TEXT" : undefined);
+    const headerFormat = rawFormat === "NONE" ? undefined : rawFormat;
     if (headerFormat === "TEXT") {
         components.push({ type: "HEADER", format: "TEXT", text: input.headerText });
     } else if (headerFormat && input.headerHandle) {
