@@ -36,6 +36,10 @@ export const config = {
     },
 };
 
+export function primaryFrontendUrl(): string {
+    return config.frontendUrl.split(",")[0].trim().replace(/\/+$/, "");
+}
+
 export function validateRequiredConfig(): void {
     if (!config.databaseUrl) throw new Error("DATABASE_URL is not set");
 }
