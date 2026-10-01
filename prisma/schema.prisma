@@ -28,6 +28,7 @@ model Tenant {
   webhookEvents     WebhookEvent[]
   auditLogs         AuditLog[]
   botRules          BotRule[]
+  shopifyConnections ShopifyConnection[]
 
   @@map("tenants")
 }
@@ -277,4 +278,22 @@ model BotRule {
   @@index([tenantId, active])
   @@index([tenantId, whatsappAccountId])
   @@map("bot_rules")
+}
+
+model ShopifyConnection {
+  id                    String   @id @default(cuid())
+  tenantId              String   @map("tenant_id")
+  shop                  String
+  encryptedAccessToken  String   @map("encrypted_access_token") @db.Text
+  scopes                String?  @db.Text
+  status                String   @default("ACTIVE")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, shop])
+  @@index([shop])
+  @@index([tenantId])
+  @@map("shopify_connections")
 }

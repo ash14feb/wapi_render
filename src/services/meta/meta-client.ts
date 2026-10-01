@@ -317,9 +317,15 @@ export async function uploadSendMedia(
   const version = sanitizeVersion(params.graphVersion);
   const form = new FormData();
   form.append("messaging_product", "whatsapp");
+  // Copy into a plain ArrayBuffer (always a valid BlobPart on every TS/lib.dom
+  // version) instead of passing the Uint8Array view directly, whose generic
+  // ArrayBufferLike backing trips TS2322 on stricter builds.
+  const _bytes = params.data;
+  const _copy: ArrayBuffer = new ArrayBuffer(_bytes.byteLength);
+  new Uint8Array(_copy).set(_bytes);
   form.append(
     "file",
-    new Blob([params.data], { type: params.mimeType }),
+    new Blob([_copy], { type: params.mimeType }),
     params.fileName,
   );
 
