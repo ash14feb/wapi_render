@@ -88,7 +88,52 @@ export async function shopifyWebhook(req: Request, res: Response): Promise<void>
         tid = row?.tenantId ?? null;
     } catch { /* table may not exist yet — still ack 200 */ }
     res.status(200).json({ ok: true });
+    // Persist every webhook for DB visibility (best-effort, never blocks ack).
+    const externalId = String((req.body as any)?.id ?? (req.headers["x-shopify-webhook-id"] as string | undefined) ?? `${topic}:${Date.now()}`);
+    const payloadJson = JSON.stringify(req.body ?? {}).slice(0, 50000);
+    try {
+        if (tid) {
+            await prisma.webhookEvent.upsert({
+                where: { tenantId_externalEventId: { tenantId: tid, externalEventId: `shopify:${externalId}` } },
+                update: { processingStatus: "PROCESSED", payloadJson },
+                create: {
+                    tenantId: tid,
+                    eventType: `shopify:${topic || "unknown"}`,
+                    externalEventId: `shopify:${externalId}`,
+                    payloadJson,
+                    processingStatus: "PROCESSED",
+                },
+            });
+        } else {
+            await prisma.webhookEvent.create({
+                data: {
+                    eventType: `shopify:${topic || "unknown"}`,
+                    externalEventId: `shopify:${externalId}`,
+                    payloadJson,
+                    processingStatus: "UNRESOLVED",
+                    errorMessage: `No ACTIVE connection for shop ${shop}`,
+                },
+            });
+        }
+    } catch { /* table/unique edge — ignore */ }
     if (!tid) return;
     const kind = topic === "orders/create" ? "ORDER_CREATED" : topic === "orders/fulfilled" ? "ORDER_FULFILLED" : topic.startsWith("checkouts/") ? "CHECKOUT_ABANDONED" : null;
     if (kind) void notifyOrderEvent(tid, kind, req.body);
+}
+
+/** GET /api/v1/integrations/shopify/events (auth) — recent webhook deliveries for UI. */
+export async function shopifyEvents(req: Request, res: Response): Promise<void> {
+    const tid = tenantId(req);
+    if (!tid) { sendError(res, "UNAUTHORIZED", "Missing auth", 401); return; }
+    try {
+        const rows = await prisma.webhookEvent.findMany({
+            where: { tenantId: tid, eventType: { startsWith: "shopify:" } },
+            orderBy: { receivedAt: "desc" },
+            take: 20,
+            select: { eventType: true, externalEventId: true, processingStatus: true, errorMessage: true, receivedAt: true },
+        });
+        sendSuccess(res, { events: rows });
+    } catch {
+        sendSuccess(res, { events: [] });
+    }
 }
