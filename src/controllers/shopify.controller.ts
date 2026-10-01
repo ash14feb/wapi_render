@@ -74,13 +74,24 @@ export async function shopifyDisconnect(req: Request, res: Response): Promise<vo
 /** POST /api/v1/integrations/shopify/webhooks (public, HMAC-verified). */
 export async function shopifyWebhook(req: Request, res: Response): Promise<void> {
     const secret = config.shopify.apiSecret;
+    const topic = (req.headers["x-shopify-topic"] as string | undefined) ?? "";
+    const shop = (req.headers["x-shopify-shop-domain"] as string | undefined) ?? "";
     const raw = (req as Request & { rawBody?: Buffer }).rawBody ?? Buffer.from(JSON.stringify(req.body ?? {}));
     if (!verifyShopifyHmac(raw, req.headers["x-shopify-hmac-sha256"] as string | undefined, secret)) {
+        try {
+            await prisma.webhookEvent.create({
+                data: {
+                    eventType: `shopify:${topic || "unknown"}:auth_failed`,
+                    externalEventId: `shopify:authfail:${Date.now()}`,
+                    payloadJson: JSON.stringify({ shop, topic, hint: "HMAC mismatch — check SHOPIFY_API_SECRET" }).slice(0, 2000),
+                    processingStatus: "FAILED",
+                    errorMessage: "HMAC mismatch",
+                },
+            });
+        } catch { /* ignore */ }
         sendError(res, "WEBHOOK_SIGNATURE_INVALID", "Invalid Shopify signature", 403);
         return;
     }
-    const topic = (req.headers["x-shopify-topic"] as string | undefined) ?? "";
-    const shop = (req.headers["x-shopify-shop-domain"] as string | undefined) ?? "";
     // Resolve tenant by shop domain; ack fast regardless.
     let tid: string | null = null;
     try {
