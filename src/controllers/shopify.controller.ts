@@ -74,10 +74,13 @@ export async function shopifyDisconnect(req: Request, res: Response): Promise<vo
 /** POST /api/v1/integrations/shopify/webhooks (public, HMAC-verified). */
 export async function shopifyWebhook(req: Request, res: Response): Promise<void> {
     const secret = config.shopify.apiSecret;
+    const webhookSecret = (config.shopify as { webhookSecret?: string }).webhookSecret ?? "";
     const topic = (req.headers["x-shopify-topic"] as string | undefined) ?? "";
     const shop = (req.headers["x-shopify-shop-domain"] as string | undefined) ?? "";
     const raw = (req as Request & { rawBody?: Buffer }).rawBody ?? Buffer.from(JSON.stringify(req.body ?? {}));
-    if (!verifyShopifyHmac(raw, req.headers["x-shopify-hmac-sha256"] as string | undefined, secret)) {
+    const sig = req.headers["x-shopify-hmac-sha256"] as string | undefined;
+    const ok = verifyShopifyHmac(raw, sig, secret) || (webhookSecret ? verifyShopifyHmac(raw, sig, webhookSecret) : false);
+    if (!ok) {
         try {
             await prisma.webhookEvent.create({
                 data: {
@@ -138,7 +141,7 @@ export async function shopifyEvents(req: Request, res: Response): Promise<void> 
     if (!tid) { sendError(res, "UNAUTHORIZED", "Missing auth", 401); return; }
     try {
         const rows = await prisma.webhookEvent.findMany({
-            where: { tenantId: tid, eventType: { startsWith: "shopify:" } },
+            where: { eventType: { startsWith: "shopify:" }, OR: [{ tenantId: tid }, { tenantId: null }] },
             orderBy: { receivedAt: "desc" },
             take: 20,
             select: { eventType: true, externalEventId: true, processingStatus: true, errorMessage: true, receivedAt: true },

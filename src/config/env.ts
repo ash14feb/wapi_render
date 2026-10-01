@@ -33,6 +33,7 @@ export const config = {
         apiSecret: process.env.SHOPIFY_API_SECRET ?? "",
         scopes: process.env.SHOPIFY_SCOPES ?? "read_orders,read_customers,read_checkouts,read_fulfillments",
         appUrl: process.env.SHOPIFY_APP_URL ?? "",
+        webhookSecret: process.env.SHOPIFY_WEBHOOK_SECRET ?? "",
     },
 };
 
