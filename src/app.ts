@@ -13,6 +13,7 @@ import { mediaRouter } from "./routes/media.routes";
 import { realtimeRouter } from "./routes/realtime.routes";
 import { webhookRouter } from "./routes/webhook.routes";
 import { botsRouter } from "./routes/bots.routes";
+import { shopifyRouter } from "./routes/shopify.routes";
 import { errorHandler } from "./middleware/errorHandler";
 
 export function createApp(): express.Express {
@@ -34,9 +35,18 @@ export function createApp(): express.Express {
       credentials: true,
     }),
   );
-  // Raw body captured ONLY for webhook signature verification.
+  // Raw body captured ONLY for webhook signature verification (Meta + Shopify).
   app.use(
     "/api/v1/webhooks",
+    express.json({
+      limit: "1mb",
+      verify: (req: import("express").Request & { rawBody?: Buffer }, _res, buf) => {
+        req.rawBody = Buffer.from(buf);
+      },
+    }),
+  );
+  app.use(
+    "/api/v1/integrations/shopify/webhooks",
     express.json({
       limit: "1mb",
       verify: (req: import("express").Request & { rawBody?: Buffer }, _res, buf) => {
@@ -58,6 +68,7 @@ export function createApp(): express.Express {
   app.use("/api/v1", realtimeRouter);
   app.use("/api/v1", webhookRouter);
   app.use("/api/v1", botsRouter);
+  app.use("/api/v1", shopifyRouter);
 
   app.use(errorHandler);
 

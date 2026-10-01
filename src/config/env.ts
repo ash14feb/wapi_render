@@ -28,6 +28,12 @@ export const config = {
     configId: process.env.META_CONFIG_ID ?? "",
     redirectUri: process.env.META_REDIRECT_URI ?? "",
   },
+  shopify: {
+    apiKey: process.env.SHOPIFY_API_KEY ?? "",
+    apiSecret: process.env.SHOPIFY_API_SECRET ?? "",
+    scopes: process.env.SHOPIFY_SCOPES ?? "read_orders,read_customers,read_checkouts,read_fulfillments",
+    appUrl: process.env.SHOPIFY_APP_URL ?? "",
+  },
 };
 
 export function validateRequiredConfig(): void {
