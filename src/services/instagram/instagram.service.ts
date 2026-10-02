@@ -1,19 +1,34 @@
 import { config } from "../../config/env";
 import { prisma } from "../../config/prisma";
 
-/** Send an Instagram DM reply via Messenger Platform for Instagram. */
+/** Send an Instagram DM reply. Supports Instagram-Login apps (IG user token, default)
+ * and Facebook-Login apps (Page token) via INSTAGRAM_USE_PAGE_TOKEN=true. */
 export async function sendInstagramText(recipientId: string, text: string): Promise<string> {
-    const token = process.env.INSTAGRAM_PAGE_TOKEN ?? "";
-    const version = (config.meta.graphVersion || "v21.0").replace(/^v?/, "v");
+    const token = (process.env.INSTAGRAM_PAGE_TOKEN ?? "").trim();
     if (!token) throw new Error("INSTAGRAM_PAGE_TOKEN is not configured");
-    const res = await fetch(`https://graph.facebook.com/${version}/me/messages`, {
+    const usePageFlow = (process.env.INSTAGRAM_USE_PAGE_TOKEN ?? "").toLowerCase() === "true";
+    if (usePageFlow) {
+        const version = (config.meta.graphVersion || "v21.0").replace(/^v?/, "v");
+        const res = await fetch(`https://graph.facebook.com/${version}/me/messages`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ recipient: { id: recipientId }, messaging_type: "RESPONSE", message: { text } }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(`Instagram send failed (${res.status}): ${JSON.stringify(body).slice(0, 500)}`);
+        return String((body as any).message_id ?? "sent");
+    }
+    // Instagram Login flow: POST https://graph.instagram.com/{v}/{ig-id}/messages
+    const igId = (process.env.INSTAGRAM_IG_USER_ID ?? "").trim();
+    if (!igId) throw new Error("Set INSTAGRAM_IG_USER_ID to your Business IG id (e.g. 17841459475571473 for itsreviver)");
+    const res = await fetch(`https://graph.instagram.com/v25.0/${igId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ recipient: { id: recipientId }, messaging_type: "RESPONSE", message: { text } }),
+        body: JSON.stringify({ recipient: { id: recipientId }, message: { text } }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(`Instagram send failed (${res.status}): ${JSON.stringify(body).slice(0, 500)}`);
-    return String((body as any).message_id ?? "sent");
+    return String((body as any).id ?? (body as any).message_id ?? "sent");
 }
 
 /** Persist inbound Instagram webhook + extract message summaries for UI. */
