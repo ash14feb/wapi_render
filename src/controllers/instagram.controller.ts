@@ -57,7 +57,7 @@ export async function instagramEvents(_req: Request, res: Response): Promise<voi
             events: rows.map((r) => {
                 try {
                     const p = JSON.parse(r.payloadJson) as { senderId?: string; text?: string };
-                    if (r.eventType === "instagram:test") return { senderId: "meta-test", text: "webhook test ping OK", receivedAt: r.receivedAt };
+                    if (r.eventType === "instagram:test") return { senderId: "meta-test", text: "webhook test ping OK", receivedAt: r.receivedAt }; 
                     return { senderId: p.senderId ?? "?", text: p.text ?? "", receivedAt: r.receivedAt };
                 } catch { return { senderId: "?", text: "", receivedAt: r.receivedAt }; }
             }),
