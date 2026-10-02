@@ -22,21 +22,26 @@ export async function processInstagramWebhook(payload: any): Promise<{ applied: 
     let applied = 0;
     let sawMessaging = false;
     for (const entry of entries) {
+        const entryIgId = entry?.id ? String(entry.id) : undefined;
         for (const m of entry?.messaging ?? []) {
             sawMessaging = true;
-            const senderId = m?.sender?.id ?? "unknown";
-            const text = m?.message?.text ?? m?.postback?.title ?? "";
+            const senderId = m?.sender?.id ?? entry?.sender?.id ?? entryIgId ?? "unknown";
+            const kind = m?.message ? "message" : m?.postback ? "postback" : m?.read ? "read" : m?.reaction ? "reaction" : "other";
+            const text =
+                m?.message?.text ?? m?.message?.quick_reply?.payload ?? m?.postback?.title ?? m?.postback?.payload ??
+                (m?.read ? `seen ${m.read.mid ?? ""}`.trim() : m?.reaction ? `reaction ${m.reaction?.reaction ?? ""} on ${m.reaction?.mid ?? ""}`.trim() : JSON.stringify(m).slice(0, 300));
+            const mid = m?.message?.mid ?? m?.read?.mid ?? m?.reaction?.mid ?? m?.postback?.mid ?? null;
             try {
                 await prisma.webhookEvent.create({
                     data: {
-                        eventType: "instagram:message",
-                        externalEventId: `ig:${m?.message?.mid ?? Date.now()}-${Math.random().toString(36).slice(2)}`,
-                        payloadJson: JSON.stringify({ senderId, text, raw: m }).slice(0, 20000),
+                        eventType: `instagram:${kind}`,
+                        externalEventId: `ig:${mid ?? Date.now()}-${Math.random().toString(36).slice(2)}`,
+                        payloadJson: JSON.stringify({ senderId, text, kind, raw: m }).slice(0, 20000),
                         processingStatus: "PROCESSED",
                     },
                 });
                 applied++;
-            } catch { /* ignore  */ }
+            } catch { /* ignore */ }
         }
     }
     if (!sawMessaging) {
