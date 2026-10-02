@@ -18,6 +18,17 @@ export async function receiveInstagram(req: Request, res: Response): Promise<voi
     if (appSecret) {
         const raw = (req as Request & { rawBody?: Buffer }).rawBody ?? JSON.stringify(req.body ?? {});
         if (!verifyMetaSignature(raw, req.headers["x-hub-signature-256"] as string | undefined, appSecret)) {
+            try {
+                await prisma.webhookEvent.create({
+                    data: {
+                        eventType: "instagram:auth_failed",
+                        externalEventId: `ig:authfail:${Date.now()}`,
+                        payloadJson: JSON.stringify({ hint: "HMAC mismatch — check META_APP_SECRET", hasSig: !!req.headers["x-hub-signature-256"] }).slice(0, 2000),
+                        processingStatus: "FAILED",
+                        errorMessage: "HMAC mismatch",
+                    },
+                });
+            } catch { /* ignore */ }
             sendError(res, "WEBHOOK_SIGNATURE_INVALID", "Invalid webhook signature", 403);
             return;
         }
@@ -44,7 +55,7 @@ export async function instagramSend(req: Request, res: Response): Promise<void> 
     }
 }
 
-/** GET /api/v1/integrations/instagram/events (auth) — recent IG DMs. */ 
+/** GET /api/v1/integrations/instagram/events (auth) — recent IG DMs. */
 export async function instagramEvents(_req: Request, res: Response): Promise<void> {
     try {
         const rows = await prisma.webhookEvent.findMany({
@@ -57,7 +68,7 @@ export async function instagramEvents(_req: Request, res: Response): Promise<voi
             events: rows.map((r) => {
                 try {
                     const p = JSON.parse(r.payloadJson) as { senderId?: string; text?: string };
-                    if (r.eventType === "instagram:test") return { senderId: "meta-test", text: "webhook test ping OK", receivedAt: r.receivedAt }; 
+                    if (r.eventType === "instagram:test") return { senderId: "meta-test", text: "webhook test ping OK", receivedAt: r.receivedAt };
                     return { senderId: p.senderId ?? "?", text: p.text ?? "", receivedAt: r.receivedAt };
                 } catch { return { senderId: "?", text: "", receivedAt: r.receivedAt }; }
             }),

@@ -36,7 +36,7 @@ export async function processInstagramWebhook(payload: any): Promise<{ applied: 
                     },
                 });
                 applied++;
-            } catch { /* ignore */ }
+            } catch { /* ignore  */ }
         }
     }
     if (!sawMessaging) {
