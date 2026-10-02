@@ -44,7 +44,7 @@ export async function instagramSend(req: Request, res: Response): Promise<void> 
     }
 }
 
-/** GET /api/v1/integrations/instagram/events (auth) — recent IG DMs. */
+/** GET /api/v1/integrations/instagram/events (auth) — recent IG DMs. */ 
 export async function instagramEvents(_req: Request, res: Response): Promise<void> {
     try {
         const rows = await prisma.webhookEvent.findMany({
