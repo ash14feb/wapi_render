@@ -15,9 +15,13 @@ export function verifyInstagram(req: Request, res: Response): void {
 /** POST /api/v1/webhooks/instagram — inbound DMs/comments. HMAC-verified, fast-ack. */
 export async function receiveInstagram(req: Request, res: Response): Promise<void> {
     const appSecret = process.env.META_APP_SECRET ?? "";
-    if (appSecret) {
+    const altSecret = process.env.META_APP_SECRET_IG ?? "";
+    if (appSecret || altSecret) {
         const raw = (req as Request & { rawBody?: Buffer }).rawBody ?? JSON.stringify(req.body ?? {});
-        if (!verifyMetaSignature(raw, req.headers["x-hub-signature-256"] as string | undefined, appSecret)) {
+        const sig = req.headers["x-hub-signature-256"] as string | undefined;
+        const okPrimary = appSecret ? verifyMetaSignature(raw, sig, appSecret) : false;
+        const okAlt = altSecret ? verifyMetaSignature(raw, sig, altSecret) : false;
+        if (!okPrimary && !okAlt) {
             try {
                 await prisma.webhookEvent.create({
                     data: {
