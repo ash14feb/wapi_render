@@ -38,7 +38,11 @@ export async function processInstagramWebhook(payload: any): Promise<{ applied: 
     let sawMessaging = false;
     for (const entry of entries) {
         const entryIgId = entry?.id ? String(entry.id) : undefined;
-        for (const m of entry?.messaging ?? []) {
+        const items: { m: any; via: string }[] = [
+            ...(entry?.messaging ?? []).map((m: any) => ({ m, via: "messaging" })),
+            ...(entry?.standby ?? []).map((m: any) => ({ m, via: "standby" })),
+        ];
+        for (const { m, via } of items) {
             sawMessaging = true;
             const senderId = m?.sender?.id ?? entry?.sender?.id ?? entryIgId ?? "unknown";
             const kind = m?.message ? "message" : m?.postback ? "postback" : m?.read ? "read" : m?.reaction ? "reaction" : "other";
@@ -51,7 +55,7 @@ export async function processInstagramWebhook(payload: any): Promise<{ applied: 
                     data: {
                         eventType: `instagram:${kind}`,
                         externalEventId: `ig:${mid ?? Date.now()}-${Math.random().toString(36).slice(2)}`,
-                        payloadJson: JSON.stringify({ senderId, text, kind, raw: m }).slice(0, 20000),
+                        payloadJson: JSON.stringify({ senderId, text, kind, via, raw: m }).slice(0, 20000),
                         processingStatus: "PROCESSED",
                     },
                 });
