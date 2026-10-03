@@ -46,10 +46,33 @@ export async function processInstagramWebhook(payload: any): Promise<{ applied: 
             sawMessaging = true;
             const senderId = m?.sender?.id ?? entry?.sender?.id ?? entryIgId ?? "unknown";
             const kind = m?.message ? "message" : m?.postback ? "postback" : m?.read ? "read" : m?.reaction ? "reaction" : "other";
-            const text =
+            let text =
                 m?.message?.text ?? m?.message?.quick_reply?.payload ?? m?.postback?.title ?? m?.postback?.payload ??
                 (m?.read ? `seen ${m.read.mid ?? ""}`.trim() : m?.reaction ? `reaction ${m.reaction?.reaction ?? ""} on ${m.reaction?.mid ?? ""}`.trim() : JSON.stringify(m).slice(0, 300));
             const mid = m?.message?.mid ?? m?.read?.mid ?? m?.reaction?.mid ?? m?.postback?.mid ?? null;
+            // Fallback: read receipts carry the seen message's mid — try fetching its body.
+            if (kind === "read" && mid) {
+                try {
+                    const tok = (process.env.INSTAGRAM_PAGE_TOKEN ?? "").trim();
+                    if (tok) {
+                        const r = await fetch(`https://graph.instagram.com/v25.0/${encodeURIComponent(mid)}?fields=id,text,created_time,from,to&access_token=${encodeURIComponent(tok)}`);
+                        const j = (await r.json().catch(() => ({}))) as { text?: string; from?: { id?: string } };
+                        if (r.ok && j.text) {
+                            text = j.text;
+                            const fromId = j.from?.id;
+                            await prisma.webhookEvent.create({
+                                data: {
+                                    eventType: "instagram:message",
+                                    externalEventId: `ig:${mid}-fetched`,
+                                    payloadJson: JSON.stringify({ senderId: fromId ?? senderId, text, kind: "message", via: `${via}+fetch`, raw: j }).slice(0, 20000),
+                                    processingStatus: "PROCESSED",
+                                },
+                            });
+                            applied++;
+                        }
+                    }
+                } catch { /* best-effort only */ }
+            }
             try {
                 await prisma.webhookEvent.create({
                     data: {
