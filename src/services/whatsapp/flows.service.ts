@@ -3,7 +3,7 @@ import { config } from "../../config/env";
 import { decryptToken } from "../../utils/crypto";
 import { buildFlowJson, validateScreens } from "../../utils/flowBuilder";
 import type { FlowScreen } from "../../utils/flowBuilder";
-import { createFlow, listFlows, publishFlow, sendFlowMessage, uploadFlowJson } from "../meta/meta-client";
+import { createFlow, getFlowValidation, listFlows, publishFlow, sendFlowMessage, uploadFlowJson } from "../meta/meta-client";
 import { WhatsappServiceError } from "./whatsapp.service";
 import type { CreateFlowInput, SendFlowInput, UpdateFlowInput } from "../../validators/flows.validator";
 
@@ -73,25 +73,39 @@ export async function publishLocalFlow(tenantId: string, id: string, whatsappAcc
     if (!account) throw new WhatsappServiceError("WHATSAPP_ACCOUNT_NOT_FOUND", "No WhatsApp account found for tenant", 404);
     const accessToken = tokenOf(account.encryptedAccessToken);
     const gv = config.meta.graphVersion;
+    let knownMetaId: string | null = flow.metaFlowId;
     try {
         // No Meta id yet → create + publish in ONE call (avoids the separate
         // assets upload entirely). validation_errors surface in the message.
-        if (!flow.metaFlowId) {
+        if (!knownMetaId) {
             const created = await createFlow({ wabaId: account.wabaId, accessToken, graphVersion: gv, name: flow.name, categories: JSON.parse(flow.categories ?? '["OTHER"]') as string[], flowJson: flow.flowJson, publish: true });
+            knownMetaId = created.id;
             return await prisma.whatsappFlow.update({ where: { id }, data: { metaFlowId: created.id, status: "PUBLISHED" } });
         }
         // Draft created earlier without JSON → multipart upload, then publish.
-        await uploadFlowJson({ flowId: flow.metaFlowId, accessToken, graphVersion: gv, flowJson: flow.flowJson });
-        await publishFlow({ flowId: flow.metaFlowId, accessToken, graphVersion: gv });
+        await uploadFlowJson({ flowId: knownMetaId, accessToken, graphVersion: gv, flowJson: flow.flowJson });
+        await publishFlow({ flowId: knownMetaId, accessToken, graphVersion: gv });
         return await prisma.whatsappFlow.update({ where: { id }, data: { status: "PUBLISHED" } });
     } catch (err) {
         const message = err instanceof Error ? err.message : "Meta publish failed";
         const status = (err as { status?: number }).status ?? 502;
         const metaBody = (err as { metaBody?: unknown }).metaBody;
         const metaCode = (err as { metaCode?: number }).metaCode;
-        const detail = metaBody !== undefined && metaBody !== null
+        let detail = metaBody !== undefined && metaBody !== null
             ? ` | meta_code=${metaCode ?? "?"} body=${JSON.stringify(metaBody).slice(0, 1000)}`
             : "";
+        // If Meta created the flow but refused publish, remember the id (no dupes)
+        // and pull its validation checklist for the message.
+        const createdId = /Flow ID:\s*(\d+)/.exec(`${message} ${JSON.stringify(metaBody ?? "")}`)?.[1] ?? null;
+        const effectiveId = knownMetaId ?? createdId;
+        if (effectiveId) {
+            await prisma.whatsappFlow.update({ where: { id }, data: { metaFlowId: effectiveId } }).catch(() => undefined);
+            try {
+                const diag = (await getFlowValidation({ flowId: effectiveId, accessToken, graphVersion: gv })) as { validation_errors?: { message?: string; error?: string }[] };
+                const list = (diag.validation_errors ?? []).map((e) => e.message ?? e.error ?? "error").join("; ").slice(0, 800);
+                if (list) detail += ` | flow_checks: ${list}`;
+            } catch { /* diagnostics best-effort */ }
+        }
         throw new WhatsappServiceError("FLOW_PUBLISH_FAILED", `Meta: ${message}${detail}`, status);
     } finally {
         // accessToken is a local copy; nothing to clear.

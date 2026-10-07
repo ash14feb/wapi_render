@@ -733,6 +733,16 @@ export async function uploadFlowJson(
     }
 }
 
+/** GET /{flow-id} — status + validation errors for diagnostics. */
+export async function getFlowValidation(
+    params: FlowRefParams,
+    fetchFn: FetchFn = fetch,
+): Promise<unknown> {
+    const version = sanitizeVersion(params.graphVersion);
+    const url = `https://graph.facebook.com/${version}/${encodeURIComponent(params.flowId)}?fields=id,name,status,validation_errors`;
+    return graphRead(url, params.accessToken, fetchFn);
+}
+
 /** POST /{flow-id}/publish — publishes a DRAFT flow. */
 export async function publishFlow(params: FlowRefParams, fetchFn: FetchFn = fetch): Promise<void> {
     const version = sanitizeVersion(params.graphVersion);
