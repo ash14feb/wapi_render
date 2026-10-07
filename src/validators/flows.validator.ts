@@ -5,10 +5,13 @@ export const FLOW_CATEGORIES = ["SIGN_UP", "SIGN_IN", "APPOINTMENT_BOOKING", "LE
 // Meta flow names behave like template names: lowercase snake_case.
 export const flowNameSchema = z.string().min(1).max(100).regex(/^[a-z0-9_]+$/, "Flow name must be lowercase letters, numbers, underscores only (e.g. cod_confirm_form)");
 
+// Meta ids (screen id, option id, field name): alphabets + underscores only.
+const metaId = z.string().min(1).max(64).regex(/^[A-Za-z][A-Za-z_]*$/, "Must start with a letter, alphabets and underscores only (no numbers)");
+
 const fieldSchema = z.object({
     kind: z.enum(["text", "textarea", "number", "email", "dropdown", "checkbox", "radio", "date"]),
     label: z.string().min(1).max(120),
-    name: z.string().min(1).max(64),
+    name: metaId,
     required: z.boolean().optional(),
     placeholder: z.string().max(200).optional(),
     options: z.array(z.string().min(1).max(120)).max(50).optional(),

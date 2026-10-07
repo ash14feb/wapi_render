@@ -15,7 +15,18 @@ export interface FlowScreen {
     fields: FlowField[];
 }
 
-const ID_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const ID_RE = /^[A-Za-z][A-Za-z_]{0,63}$/;
+
+/** A, B, … Z, AA, AB … — Meta ids allow alphabets + underscores only (no digits). */
+export function alphaSeq(i: number): string {
+    let s = "";
+    let n = i;
+    do {
+        s = String.fromCharCode(65 + (n % 26)) + s;
+        n = Math.floor(n / 26) - 1;
+    } while (n >= 0);
+    return s;
+}
 
 export function validateScreens(screens: FlowScreen[]): string | null {
     if (!Array.isArray(screens) || screens.length === 0 || screens.length > 10) return "Provide 1-10 screens";
@@ -40,7 +51,7 @@ export function validateScreens(screens: FlowScreen[]): string | null {
 }
 
 function staticOptions(options: string[]) {
-    return { type: "Static", options: options.map((t, i) => ({ id: `opt${i}`, title: t })) };
+    return { type: "Static", options: options.map((t, i) => ({ id: `opt_${alphaSeq(i).toLowerCase()}`, title: t })) };
 }
 
 function fieldComponent(f: FlowField): Record<string, unknown> {
