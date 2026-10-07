@@ -13,36 +13,55 @@ export interface CampaignHeader {
   id?: string;
 }
 
+export interface CampaignButtonValue {
+  index: number;
+  /** "url" fills a variable URL suffix ({{1}}); "copy_code" fills the coupon code. */
+  kind: "url" | "copy_code";
+  value: string;
+}
+
 export interface CampaignPayload {
   body: string[];
   header: CampaignHeader | null;
+  buttons: CampaignButtonValue[];
 }
 
 /** Parses parametersJson; supports the legacy plain-array shape. */
 export function parseCampaignPayload(json: string | null): CampaignPayload {
-  if (!json) return { body: [], header: null };
+  if (!json) return { body: [], header: null, buttons: [] };
   try {
     const parsed: unknown = JSON.parse(json);
-    if (Array.isArray(parsed)) return { body: parsed.filter((x): x is string => typeof x === "string"), header: null };
+    if (Array.isArray(parsed)) return { body: parsed.filter((x): x is string => typeof x === "string"), header: null, buttons: [] };
     if (parsed && typeof parsed === "object") {
-      const o = parsed as { body?: unknown; header?: unknown };
+      const o = parsed as { body?: unknown; header?: unknown; buttons?: unknown };
       const header =
         o.header && typeof o.header === "object" &&
         ["image", "video", "document"].includes((o.header as { kind?: string }).kind ?? "")
           ? (o.header as CampaignHeader)
           : null;
+      const buttons = Array.isArray(o.buttons)
+        ? o.buttons.filter(
+            (b): b is CampaignButtonValue =>
+              !!b && typeof b === "object" &&
+              Number.isInteger((b as { index?: unknown }).index) &&
+              ((b as { kind?: unknown }).kind === "url" || (b as { kind?: unknown }).kind === "copy_code") &&
+              typeof (b as { value?: unknown }).value === "string",
+          )
+        : [];
       return {
         body: Array.isArray(o.body) ? o.body.filter((x): x is string => typeof x === "string") : [],
         header,
+        buttons,
       };
     }
   } catch {
     // fall through
   }
-  return { body: [], header: null };
+  return { body: [], header: null, buttons: [] };
 }
 
-/** Components for the send payload: header media first, then body params.
+/** Components for the send payload: header media first, then body params,
+ * then button params (variable URL suffixes + copy codes).
  * AUTHENTICATION templates MUST also carry the OTP a second time in a
  * button component (type button, sub_type url, index 0) — Meta rejects
  * the send with "Invalid parameter" otherwise. */
@@ -67,6 +86,14 @@ export function buildCampaignComponents(payload: CampaignPayload, authOtp?: stri
       sub_type: "url",
       index: "0",
       parameters: [{ type: "text", text: authOtp }],
+    });
+  }
+  for (const b of payload.buttons ?? []) {
+    components.push({
+      type: "button",
+      sub_type: b.kind === "copy_code" ? "copy_code" : "url",
+      index: String(b.index),
+      parameters: b.kind === "copy_code" ? [{ type: "coupon_code", coupon_code: b.value }] : [{ type: "text", text: b.value }],
     });
   }
   return components.length > 0 ? components : undefined;

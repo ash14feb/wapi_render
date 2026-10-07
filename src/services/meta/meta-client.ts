@@ -21,10 +21,11 @@ export class MetaApiError extends Error {
 
 export interface TemplateComponent {
   type: "header" | "body" | "button";
-  sub_type?: "quick_reply" | "url";
+  sub_type?: "quick_reply" | "url" | "copy_code";
   index?: string;
   parameters?: Array<
     | { type: "text"; text: string }
+    | { type: "coupon_code"; coupon_code: string }
     | { type: "image" | "video" | "document"; image?: { link?: string; id?: string }; video?: { link?: string; id?: string }; document?: { link?: string; id?: string } }
   >;
 }

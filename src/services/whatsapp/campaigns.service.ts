@@ -33,6 +33,37 @@ export async function createCampaign(tenantId: string, input: CreateCampaignInpu
     );
   }
 
+  // Button values: variable URL buttons ({{1}} suffix) and copy-code buttons
+  // each need exactly one shared value, addressed by BUTTONS-array index.
+  const buttonsRequiringValues: { index: number; kind: "url" | "copy_code"; label: string }[] = [];
+  try {
+    const comps = JSON.parse(template.componentsJson ?? "[]") as { type?: string; buttons?: { type?: string; text?: string; url?: string }[] }[];
+    const btns = comps.find((c) => c.type === "BUTTONS")?.buttons ?? [];
+    btns.forEach((b, i) => {
+      if (b.type === "URL" && /\{\{1\}\}$/.test(b.url ?? "")) {
+        buttonsRequiringValues.push({ index: i, kind: "url", label: b.text ?? `button ${i}` });
+      } else if (b.type === "COPY_CODE") {
+        buttonsRequiringValues.push({ index: i, kind: "copy_code", label: b.text ?? `button ${i}` });
+      }
+    });
+  } catch { /* unparseable components — skip button checks */ }
+  const buttonValues = input.buttons ?? [];
+  if (buttonValues.length !== buttonsRequiringValues.length) {
+    const need = buttonsRequiringValues.map((b) => `"${b.label}" (${b.kind})`).join(", ");
+    throw new WhatsappServiceError(
+      "VALIDATION_ERROR",
+      buttonsRequiringValues.length === 0
+        ? "Template has no variable buttons; omit buttons"
+        : `Template needs ${buttonsRequiringValues.length} button value(s): ${need}`,
+      400,
+    );
+  }
+  for (const need of buttonsRequiringValues) {
+    const got = buttonValues.find((b) => b.index === need.index);
+    if (!got) {
+      throw new WhatsappServiceError("VALIDATION_ERROR", `Missing value for button "${need.label}" at index ${need.index}`, 400);
+    }
+  }
   // Templates with a media header require the header asset on every send —
   // otherwise Meta rejects with #132012 (parameter format mismatch).
   const headerFormat = extractHeaderFormat(template.componentsJson);
@@ -81,7 +112,11 @@ export async function createCampaign(tenantId: string, input: CreateCampaignInpu
       name: input.name,
       templateId: template.id,
       whatsappAccountId,
-      parametersJson: JSON.stringify({ body: parameters, header: input.headerMedia ?? null }),
+      parametersJson: JSON.stringify({
+        body: parameters,
+        header: input.headerMedia ?? null,
+        buttons: buttonValues.map((b) => ({ index: b.index, kind: buttonsRequiringValues.find((n) => n.index === b.index)?.kind ?? "url", value: b.value })),
+      }),
       status,
       scheduledAt,
       recipients: {

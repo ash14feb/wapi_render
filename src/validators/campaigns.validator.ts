@@ -17,6 +17,17 @@ export const createCampaignSchema = z.object({
     })
     .refine((v) => v.link ?? v.id, { message: "Header media needs link or id" })
     .optional(),
+  // Button values for templates with variable URL buttons ({{1}} suffix) or
+  // copy-code buttons. `index` is the button's position in the BUTTONS array.
+  buttons: z
+    .array(
+      z.object({
+        index: z.number().int().min(0).max(9),
+        value: z.string().min(1).max(1024),
+      }),
+    )
+    .max(10)
+    .optional(),
   scheduledAt: z.string().datetime({ offset: true }).optional(),
   whatsappAccountId: z.string().min(1).max(64).optional(),
 });

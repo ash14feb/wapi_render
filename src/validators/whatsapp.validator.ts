@@ -4,6 +4,8 @@ const languageSchema = z.string().min(2).max(10);
 
 const textParam = z.object({ type: z.literal("text"), text: z.string().min(1).max(1024) });
 
+const couponParam = z.object({ type: z.literal("coupon_code"), coupon_code: z.string().min(1).max(64) });
+
 const mediaRef = z
   .object({ link: z.string().url().max(2048).optional(), id: z.string().min(1).max(256).optional() })
   .refine((v) => v.link ?? v.id, { message: "Media parameter needs link or id" });
@@ -27,9 +29,9 @@ const headerComponentSchema = z.object({
 
 const buttonComponentSchema = z.object({
   type: z.literal("button"),
-  sub_type: z.enum(["quick_reply", "url"]).optional(),
+  sub_type: z.enum(["quick_reply", "url", "copy_code"]).optional(),
   index: z.string().regex(/^\d+$/).optional(),
-  parameters: z.array(textParam).max(20).optional(),
+  parameters: z.array(z.union([textParam, couponParam])).max(20).optional(),
 });
 
 const componentSchema = z.union([bodyComponentSchema, headerComponentSchema, buttonComponentSchema]);

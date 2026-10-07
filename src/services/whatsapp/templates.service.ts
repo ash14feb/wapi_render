@@ -111,11 +111,32 @@ export const createTemplateSchema = z.object({
   footerText: z.string().max(60).optional(),
   // One sample value per {{n}} variable, in order — required by Meta review.
   examples: z.array(z.string().min(1).max(1024)).max(20).optional(),
+  // CTA / interactive buttons (UTILITY + MARKETING only).
+  // URL supports one trailing variable: url must end with {{1}} + example sample URL.
+  buttons: z
+    .array(
+      z.object({
+        type: z.enum(["URL", "PHONE_NUMBER", "QUICK_REPLY", "COPY_CODE", "FLOW"]),
+        text: z.string().min(1).max(25),
+        url: z.string().max(2000).optional(),
+        phoneNumber: z.string().max(20).optional(),
+        example: z.string().max(2000).optional(),
+        flowId: z.string().max(128).optional(),
+        navigateScreen: z.string().max(64).optional(),
+      }),
+    )
+    .max(10)
+    .optional(),
   // AUTHENTICATION only: code expiry minutes shown in the footer (1-60).
   codeExpirationMinutes: z.number().int().min(1).max(60).optional(),
   whatsappAccountId: z.string().min(1).max(64).optional(),
 }).superRefine((v, ctx) => {
-  if (v.category === "AUTHENTICATION") return;
+  if (v.category === "AUTHENTICATION") {
+    if (v.buttons?.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Buttons are not allowed on AUTHENTICATION templates", path: ["buttons"] });
+    }
+    return;
+  }
   if (!v.bodyText?.trim()) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "bodyText is required for UTILITY/MARKETING templates", path: ["bodyText"] });
   }
@@ -126,6 +147,33 @@ export const createTemplateSchema = z.object({
   if (fmt && ["IMAGE", "VIDEO", "DOCUMENT"].includes(fmt) && !v.headerHandle) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: `headerHandle (from media upload) is required for ${fmt} headers`, path: ["headerHandle"] });
   }
+  const buttons = v.buttons ?? [];
+  if (buttons.length > 10) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Max 10 buttons per template", path: ["buttons"] });
+  }
+  const count = (t: string) => buttons.filter((b) => b.type === t).length;
+  if (count("URL") > 2) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Max 2 URL buttons per template", path: ["buttons"] });
+  if (count("PHONE_NUMBER") > 1) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Max 1 phone-number button per template", path: ["buttons"] });
+  if (count("COPY_CODE") > 1) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Max 1 copy-code button per template", path: ["buttons"] });
+  if (count("FLOW") > 1) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Max 1 Flow button per template", path: ["buttons"] });
+  buttons.forEach((b, i) => {
+    if (b.type === "URL") {
+      if (!b.url) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Button ${i + 1}: URL is required`, path: ["buttons", i, "url"] });
+      else {
+        if (!/^https?:\/\/.+/.test(b.url)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Button ${i + 1}: URL must start with http(s)://`, path: ["buttons", i, "url"] });
+        const vars = (b.url.match(/\{\{\d+\}\}/g) ?? []).length;
+        if (vars > 1) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Button ${i + 1}: only one trailing {{1}} variable is allowed`, path: ["buttons", i, "url"] });
+        if (vars === 1 && !/\{\{1\}\}$/.test(b.url)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Button ${i + 1}: the {{1}} variable must be at the end of the URL`, path: ["buttons", i, "url"] });
+        if (vars === 1 && !b.example) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Button ${i + 1}: a sample URL is required when the URL has {{1}}`, path: ["buttons", i, "example"] });
+      }
+    }
+    if (b.type === "PHONE_NUMBER" && !b.phoneNumber) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Button ${i + 1}: phone number is required`, path: ["buttons", i, "phoneNumber"] });
+    }
+    if (b.type === "FLOW" && !b.flowId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Button ${i + 1}: published Flow ID is required`, path: ["buttons", i, "flowId"] });
+    }
+  });
 });
 
 export type CreateTemplateInput = z.infer<typeof createTemplateSchema>;
@@ -149,6 +197,40 @@ function buildCustomComponents(input: CreateTemplateInput): Array<Record<string,
   components.push(body);
   if (input.footerText) {
     components.push({ type: "FOOTER", text: input.footerText });
+  }
+  const buttons = input.buttons ?? [];
+  if (buttons.length > 0) {
+    components.push({
+      type: "BUTTONS",
+      buttons: buttons.map((b) => {
+        switch (b.type) {
+          case "URL": {
+            const hasVar = /\{\{1\}\}$/.test(b.url ?? "");
+            return {
+              type: "URL",
+              text: b.text,
+              url: b.url,
+              ...(hasVar && b.example ? { example: [b.example] } : {}),
+            };
+          }
+          case "PHONE_NUMBER":
+            return { type: "PHONE_NUMBER", text: b.text, phone_number: b.phoneNumber };
+          case "COPY_CODE":
+            return { type: "COPY_CODE", text: b.text, ...(b.example ? { example: b.example } : {}) };
+          case "FLOW":
+            return {
+              type: "FLOW",
+              text: b.text,
+              flow_id: b.flowId,
+              flow_action: "navigate",
+              ...(b.navigateScreen ? { navigate_screen: b.navigateScreen } : {}),
+            };
+          case "QUICK_REPLY":
+          default:
+            return { type: "QUICK_REPLY", text: b.text };
+        }
+      }),
+    });
   }
   return components;
 }
