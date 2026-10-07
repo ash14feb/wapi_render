@@ -1,6 +1,7 @@
 import { prisma } from "../../config/prisma";
 import { webhookPayloadSchema } from "../../validators/webhook.validator";
 import { publish, toEventMessage } from "../realtime";
+import { summarizeFlowResponse } from "../../utils/flowBuilder";
 import { handleInboundBot } from "./botEngine";
 
 const STATUS_MAP: Record<string, string> = {
@@ -23,8 +24,17 @@ function messageText(m: {
   image?: { caption?: string };
   video?: { caption?: string };
   document?: { caption?: string };
+  interactive?: { type?: string; nfm_reply?: { response_json?: string; body?: string }; button_reply?: { title?: string } };
 }): string | undefined {
   if (m.type === "text" || m.text?.body) return m.text?.body;
+  if (m.interactive?.nfm_reply) {
+    try {
+      return summarizeFlowResponse(m.interactive.nfm_reply.response_json ?? "{}");
+    } catch {
+      return m.interactive.nfm_reply.body ?? "Flow response received";
+    }
+  }
+  if (m.interactive?.button_reply?.title) return m.interactive.button_reply.title;
   return m.image?.caption ?? m.video?.caption ?? m.document?.caption ?? undefined;
 }
 
@@ -159,6 +169,28 @@ export async function processWebhookEvent(input: {
             }),
           ]);
           applied += 1;
+          // Flow form answers (nfm_reply): store as flow response, attributed
+          // to the most recent flow sent to this phone (24h window).
+          const nfm = (m as { interactive?: { nfm_reply?: { response_json?: string } } }).interactive?.nfm_reply;
+          if (nfm?.response_json) {
+            try {
+              const since = new Date(Date.now() - 24 * 3600 * 1000);
+              const sent = await prisma.webhookEvent.findFirst({
+                where: { tenantId, eventType: "whatsapp.flow.sent", receivedAt: { gte: since }, payloadJson: { contains: phone } },
+                orderBy: { receivedAt: "desc" },
+              });
+              let flowId: string | null = null;
+              try {
+                flowId = (JSON.parse(sent?.payloadJson ?? "{}") as { flowId?: string }).flowId ?? null;
+              } catch { /* keep null */ }
+              await prisma.whatsappFlowResponse.create({
+                data: { tenantId, flowId, phone, responseJson: nfm.response_json.slice(0, 20000) },
+              });
+              await prisma.webhookEvent.create({
+                data: { tenantId, eventType: "whatsapp.flow.response", externalEventId: externalId, payloadJson: JSON.stringify({ flowId, phone, response: JSON.parse(nfm.response_json) }).slice(0, 20000), processingStatus: "PROCESSED", processedAt: new Date() },
+              });
+            } catch { /* best-effort only */ }
+          }
           publish(tenantId, {
             type: "message.created",
             conversationId: conversation.id,

@@ -29,6 +29,8 @@ model Tenant {
   auditLogs         AuditLog[]
   botRules          BotRule[]
   shopifyConnections ShopifyConnection[]
+  whatsappFlows     WhatsappFlow[]
+  flowResponses     WhatsappFlowResponse[]
 
   @@map("tenants")
 }
@@ -296,4 +298,41 @@ model ShopifyConnection {
   @@index([shop])
   @@index([tenantId])
   @@map("shopify_connections")
+}
+
+model WhatsappFlow {
+  id         String   @id @default(cuid())
+  tenantId   String   @map("tenant_id")
+  metaFlowId String?  @map("meta_flow_id")
+  name       String
+  status     String   @default("DRAFT")
+  categories String?  @db.Text
+  flowJson   String   @map("flow_json") @db.LongText
+  version    Int      @default(1)
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  tenant    Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  responses WhatsappFlowResponse[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@index([metaFlowId])
+  @@map("whatsapp_flows")
+}
+
+model WhatsappFlowResponse {
+  id           String   @id @default(cuid())
+  tenantId     String   @map("tenant_id")
+  flowId       String?  @map("flow_id")
+  phone        String
+  responseJson String   @map("response_json") @db.Text
+  receivedAt   DateTime @default(now()) @map("received_at")
+
+  tenant Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  flow   WhatsappFlow?  @relation(fields: [flowId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, flowId])
+  @@map("whatsapp_flow_responses")
 }
