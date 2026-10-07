@@ -70,7 +70,8 @@ function fieldComponent(f: FlowField): Record<string, unknown> {
 export function buildFlowJson(screens: FlowScreen[], completeTitle = "Thank you", completeBody = "Your response has been recorded."): Record<string, unknown> {
   const err = validateScreens(screens);
   if (err) throw new Error(err);
-  const out: { id: string; title: string; layout: { type: string; children: unknown[] } }[] = screens.map((s, si) => {
+  interface BuiltScreen { id: string; title: string; terminal?: boolean; data: Record<string, unknown>; layout: { type: string; children: unknown[] } }
+  const out: BuiltScreen[] = screens.map((s, si) => {
     const children: unknown[] = [
       { type: "TextHeading", text: s.title },
       ...s.fields.map(fieldComponent),
@@ -86,14 +87,16 @@ export function buildFlowJson(screens: FlowScreen[], completeTitle = "Thank you"
         "on-click-action": { name: "navigate", next: { type: "screen", name: next.id }, payload: Object.fromEntries(s.fields.map((f) => [f.name, `\${form.${f.name}}`])) },
       });
     }
-    return { id: s.id, title: s.title, layout: { type: "Layout", children } };
+    return { id: s.id, title: s.title, data: {}, layout: { type: "SingleColumnLayout", children } };
   });
   out.push({
     id: "COMPLETE",
     title: completeTitle,
-    layout: { type: "Layout", children: [{ type: "TextHeading", text: completeTitle }, { type: "TextBody", text: completeBody }, { type: "Footer", label: "Done", "on-click-action": { name: "complete", payload: {} } }] },
+    terminal: true,
+    data: {},
+    layout: { type: "SingleColumnLayout", children: [{ type: "TextHeading", text: completeTitle }, { type: "TextBody", text: completeBody }, { type: "Footer", label: "Done", "on-click-action": { name: "complete", payload: {} } }] },
   });
-  return { version: "7.1", screens: out };
+  return { version: "7.0", screens: out };
 }
 
 /** Summarizes an nfm_reply response_json for inbox display. */

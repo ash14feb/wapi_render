@@ -74,14 +74,16 @@ export async function publishLocalFlow(tenantId: string, id: string, whatsappAcc
   const accessToken = tokenOf(account.encryptedAccessToken);
   const gv = config.meta.graphVersion;
   try {
-    let metaFlowId = flow.metaFlowId;
-    if (!metaFlowId) {
-      const created = await createFlow({ wabaId: account.wabaId, accessToken, graphVersion: gv, name: flow.name, categories: JSON.parse(flow.categories ?? '["OTHER"]') as string[] });
-      metaFlowId = created.id;
+    // No Meta id yet → create + publish in ONE call (avoids the separate
+    // assets upload entirely). validation_errors surface in the message.
+    if (!flow.metaFlowId) {
+      const created = await createFlow({ wabaId: account.wabaId, accessToken, graphVersion: gv, name: flow.name, categories: JSON.parse(flow.categories ?? '["OTHER"]') as string[], flowJson: flow.flowJson, publish: true });
+      return await prisma.whatsappFlow.update({ where: { id }, data: { metaFlowId: created.id, status: "PUBLISHED" } });
     }
-    await uploadFlowJson({ flowId: metaFlowId as string, accessToken, graphVersion: gv, flowJson: flow.flowJson });
-    await publishFlow({ flowId: metaFlowId as string, accessToken, graphVersion: gv });
-    return await prisma.whatsappFlow.update({ where: { id }, data: { metaFlowId, status: "PUBLISHED" } });
+    // Draft created earlier without JSON → multipart upload, then publish.
+    await uploadFlowJson({ flowId: flow.metaFlowId, accessToken, graphVersion: gv, flowJson: flow.flowJson });
+    await publishFlow({ flowId: flow.metaFlowId, accessToken, graphVersion: gv });
+    return await prisma.whatsappFlow.update({ where: { id }, data: { status: "PUBLISHED" } });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Meta publish failed";
     const status = (err as { status?: number }).status ?? 502;
@@ -119,7 +121,7 @@ export async function syncFlowsFromMeta(tenantId: string, whatsappAccountId?: st
           name: nameTaken ? `${r.name}_meta` : r.name,
           status,
           categories: JSON.stringify(r.categories ?? ["OTHER"]),
-          flowJson: '{"version":"7.1","screens":[]}',
+          flowJson: '{"version":"7.0","screens":[]}',
         },
       });
     }
