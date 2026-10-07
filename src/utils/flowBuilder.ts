@@ -89,30 +89,42 @@ export function buildFlowJson(screens: FlowScreen[], completeTitle = "Thank you"
     ];
     // Every content screen navigates forward; the terminal COMPLETE screen
     // closes the flow. (An unreachable screen fails Meta validation.)
+    // Forward ALL answers so far: earlier screens via ${data.x} (they arrived
+    // as this screen's data), own fields via ${form.x}. Otherwise the final
+    // response_json contains only flow_token.
+    const prevNames = screens.slice(0, si).flatMap((p) => p.fields.map((f) => f.name));
+    const payload: Record<string, string> = {};
+    for (const n of prevNames) payload[n] = `\${data.${n}}`;
+    for (const f of s.fields) payload[f.name] = `\${form.${f.name}}`;
     const next = si === screens.length - 1 ? "COMPLETE" : screens[si + 1].id;
     children.push({
       type: "Footer",
       label: si === screens.length - 1 ? "Submit" : "Continue",
-      "on-click-action": { name: "navigate", next: { type: "screen", name: next }, payload: Object.fromEntries(s.fields.map((f) => [f.name, `\${form.${f.name}}`])) },
+      "on-click-action": { name: "navigate", next: { type: "screen", name: next }, payload },
     });
     return { id: s.id, title: s.title, data: {}, layout: { type: "SingleColumnLayout", children } };
   });
+  const allNames = screens.flatMap((s) => s.fields.map((f) => f.name));
+  const completePayload: Record<string, string> = {};
+  for (const n of allNames) completePayload[n] = `\${data.${n}}`;
   out.push({
     id: "COMPLETE",
     title: completeTitle,
     terminal: true,
     data: {},
-    layout: { type: "SingleColumnLayout", children: [{ type: "TextHeading", text: completeTitle }, { type: "TextBody", text: completeBody }, { type: "Footer", label: "Done", "on-click-action": { name: "complete", payload: {} } }] },
+    layout: { type: "SingleColumnLayout", children: [{ type: "TextHeading", text: completeTitle }, { type: "TextBody", text: completeBody }, { type: "Footer", label: "Done", "on-click-action": { name: "complete", payload: completePayload } }] },
   });
   return { version: "7.0", screens: out };
 }
 
-/** Summarizes an nfm_reply response_json for inbox display. */
+/** Summarizes an nfm_reply response_json for inbox display (skips flow_token). */
 export function summarizeFlowResponse(responseJson: string): string {
   try {
     const obj = JSON.parse(responseJson) as Record<string, unknown>;
-    const parts = Object.entries(obj).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : String(v)}`);
-    return `Flow response — ${parts.join(" | ")}`.slice(0, 1000);
+    const parts = Object.entries(obj)
+      .filter(([k]) => k !== "flow_token")
+      .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : String(v)}`);
+    return parts.length > 0 ? `Flow response — ${parts.join(" | ")}`.slice(0, 1000) : "Flow response received";
   } catch {
     return "Flow response received";
   }
