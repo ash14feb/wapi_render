@@ -77,13 +77,24 @@ function fieldComponent(f: FlowField): Record<string, unknown> {
   }
 }
 
+/** Screen data model: every ${data.x} referenced on a screen must be declared. */
+function dataModel(fields: FlowField[]): Record<string, unknown> {
+  const data: Record<string, unknown> = {};
+  for (const f of fields) {
+    const isArray = f.kind === "checkbox";
+    data[f.name] = isArray
+      ? { type: "array", items: { type: "string" }, __example__: f.options?.slice(0, 1) ?? [] }
+      : { type: "string", __example__: f.options?.[0] ?? f.label };
+  }
+  return data;
+}
+
 /** Builds static Meta Flow JSON (routing + terminal screen included). */
 export function buildFlowJson(screens: FlowScreen[], completeTitle = "Thank you", completeBody = "Your response has been recorded."): Record<string, unknown> {
   const err = validateScreens(screens);
   if (err) throw new Error(err);
   interface BuiltScreen { id: string; title: string; terminal?: boolean; data: Record<string, unknown>; layout: { type: string; children: unknown[] } }
-  const out: BuiltScreen[] = screens.map((s, si) => {
-    const children: unknown[] = [
+  const out: BuiltScreen[] = screens.map((s, si) => {    const children: unknown[] = [
       { type: "TextHeading", text: s.title },
       ...s.fields.map(fieldComponent),
     ];
@@ -92,9 +103,9 @@ export function buildFlowJson(screens: FlowScreen[], completeTitle = "Thank you"
     // Forward ALL answers so far: earlier screens via ${data.x} (they arrived
     // as this screen's data), own fields via ${form.x}. Otherwise the final
     // response_json contains only flow_token.
-    const prevNames = screens.slice(0, si).flatMap((p) => p.fields.map((f) => f.name));
+    const prevFields = screens.slice(0, si).flatMap((p) => p.fields);
     const payload: Record<string, string> = {};
-    for (const n of prevNames) payload[n] = `\${data.${n}}`;
+    for (const f of prevFields) payload[f.name] = `\${data.${f.name}}`;
     for (const f of s.fields) payload[f.name] = `\${form.${f.name}}`;
     const next = si === screens.length - 1 ? "COMPLETE" : screens[si + 1].id;
     children.push({
@@ -102,16 +113,17 @@ export function buildFlowJson(screens: FlowScreen[], completeTitle = "Thank you"
       label: si === screens.length - 1 ? "Submit" : "Continue",
       "on-click-action": { name: "navigate", next: { type: "screen", name: next }, payload },
     });
-    return { id: s.id, title: s.title, data: {}, layout: { type: "SingleColumnLayout", children } };
+    // Declare incoming ${data.x} in this screen's data model (Meta requires it).
+    return { id: s.id, title: s.title, data: dataModel(prevFields), layout: { type: "SingleColumnLayout", children } };
   });
-  const allNames = screens.flatMap((s) => s.fields.map((f) => f.name));
+  const allFields = screens.flatMap((s) => s.fields);
   const completePayload: Record<string, string> = {};
-  for (const n of allNames) completePayload[n] = `\${data.${n}}`;
+  for (const f of allFields) completePayload[f.name] = `\${data.${f.name}}`;
   out.push({
     id: "COMPLETE",
     title: completeTitle,
     terminal: true,
-    data: {},
+    data: dataModel(allFields),
     layout: { type: "SingleColumnLayout", children: [{ type: "TextHeading", text: completeTitle }, { type: "TextBody", text: completeBody }, { type: "Footer", label: "Done", "on-click-action": { name: "complete", payload: completePayload } }] },
   });
   return { version: "7.0", screens: out };
