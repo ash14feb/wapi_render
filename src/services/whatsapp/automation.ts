@@ -59,8 +59,8 @@ export async function handleInboundAutomation(
   }
   if (ai.replySent || ai.handoff) return { source: "AI", bot, ai };
 
-  // A human owns this conversation: don't let the DEFAULT rule talk over them.
-  if (ai.skippedReason === "ai_paused" || ai.skippedReason === "pending_human") {
+  // The agent was paused explicitly for this conversation: don't let the DEFAULT rule talk over the human.
+  if (ai.skippedReason === "ai_paused") {
     return { source: "NONE", bot, ai };
   }
 

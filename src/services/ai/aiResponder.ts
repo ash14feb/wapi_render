@@ -189,9 +189,6 @@ export async function handleInboundAi(ctx: AiInboundContext): Promise<AiOutcome>
     },
   });
   if (!conversation) return { attempted: false, replySent: false, handoff: false, skippedReason: "conversation_not_found" };
-  if (conversation.status === "PENDING_HUMAN") {
-    return { attempted: false, replySent: false, handoff: false, skippedReason: "pending_human" };
-  }
   if (isOptedOut(conversation.contact.tags)) {
     return { attempted: false, replySent: false, handoff: false, skippedReason: "opted_out" };
   }
@@ -316,7 +313,7 @@ export async function handleInboundAi(ctx: AiInboundContext): Promise<AiOutcome>
         turnsSinceSummary: turns,
         consecutiveErrors: 0,
         lastError: null,
-        ...(handoff ? { handoffAt: new Date(), aiEnabled: false } : {}),
+        ...(handoff ? { handoffAt: new Date() } : {}),
       },
     });
 
@@ -355,7 +352,7 @@ export async function handleInboundAi(ctx: AiInboundContext): Promise<AiOutcome>
       data: {
         consecutiveErrors: nextErrors,
         lastError: message.slice(0, 2000),
-        ...(shouldHandoff ? { aiEnabled: false, handoffAt: new Date() } : {}),
+        ...(shouldHandoff ? { handoffAt: new Date() } : {}),
       },
     }).catch(() => undefined);
 

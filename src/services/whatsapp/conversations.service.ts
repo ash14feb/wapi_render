@@ -183,15 +183,5 @@ export async function sendConversationMessage(
     message: toEventMessage(saved),
   });
 
-  // A human replied manually: keep the AI agent out of this conversation until
-  // someone re-enables it from the inbox.
-  await prisma.aiConversationState
-    .upsert({
-      where: { conversationId: conversation.id },
-      update: { aiEnabled: false },
-      create: { tenantId, conversationId: conversation.id, aiEnabled: false },
-    })
-    .catch(() => undefined);
-
   return { whatsappMessageId, messageId: saved.id };
 }
