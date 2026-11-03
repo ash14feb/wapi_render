@@ -5,6 +5,7 @@ import { buildFlowJson, validateScreens } from "../../utils/flowBuilder";
 import type { FlowScreen } from "../../utils/flowBuilder";
 import { createFlow, getFlowValidation, listFlows, publishFlow, sendFlowMessage, uploadFlowJson } from "../meta/meta-client";
 import { WhatsappServiceError } from "./whatsapp.service";
+import { isOptedOut, OPTED_OUT_MESSAGE } from "./optOut";
 import type { CreateFlowInput, SendFlowInput, UpdateFlowInput } from "../../validators/flows.validator";
 
 function resolveAccount(tenantId: string, whatsappAccountId?: string) {
@@ -157,6 +158,13 @@ export async function sendFlow(tenantId: string, id: string, input: SendFlowInpu
   }
   const account = await resolveAccount(tenantId, input.whatsappAccountId);
   if (!account) throw new WhatsappServiceError("WHATSAPP_ACCOUNT_NOT_FOUND", "No WhatsApp account found for tenant", 404);
+  const recipient = await prisma.contact.findUnique({
+    where: { tenantId_phone: { tenantId, phone: input.to } },
+    select: { tags: true },
+  });
+  if (recipient && isOptedOut(recipient.tags)) {
+    throw new WhatsappServiceError("CONTACT_OPTED_OUT", OPTED_OUT_MESSAGE, 403);
+  }
   const accessToken = tokenOf(account.encryptedAccessToken);
   const flowToken = `${flow.id}:${Date.now()}`;
   try {

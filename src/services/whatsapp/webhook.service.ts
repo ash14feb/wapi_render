@@ -2,7 +2,8 @@ import { prisma } from "../../config/prisma";
 import { webhookPayloadSchema } from "../../validators/webhook.validator";
 import { publish, toEventMessage } from "../realtime";
 import { summarizeFlowResponse } from "../../utils/flowBuilder";
-import { handleInboundBot } from "./botEngine";
+import { handleInboundAutomation } from "./automation";
+import { clearOptOut, isOptOutRequest, isOptedOut, markOptedOut } from "./optOut";
 
 const STATUS_MAP: Record<string, string> = {
   sent: "SENT",
@@ -124,6 +125,17 @@ export async function processWebhookEvent(input: {
           create: { tenantId, phone, profileName },
         });
 
+        const inboundText = messageText(m);
+
+        // Opt-out lifecycle: applied synchronously so a STOP is recorded even if
+        // the async bot engine never runs. Messaging the business again
+        // re-subscribes a contact that previously opted out.
+        if (inboundText && isOptOutRequest(inboundText)) {
+          await markOptedOut(contact.id).catch(() => undefined);
+        } else if (inboundText && isOptedOut(contact.tags)) {
+          await clearOptOut(contact.id).catch(() => undefined);
+        }
+
         const conversation = await prisma.conversation.upsert({
           where: {
             tenantId_whatsappAccountId_contactId: {
@@ -196,16 +208,16 @@ export async function processWebhookEvent(input: {
             conversationId: conversation.id,
             message: toEventMessage(created),
           });
-          // Rule-based bot reply: fire-and-forget, never blocks webhook 200.
-          const inboundText = messageText(m);
+          // Rules → AI → default rule: fire-and-forget, never blocks webhook 200.
           if (inboundText) {
-            void handleInboundBot({
+            void handleInboundAutomation({
               tenantId,
               accountId: account.id,
               phoneNumberId: account.phoneNumberId,
               encryptedAccessToken: account.encryptedAccessToken,
               conversationId: conversation.id,
               contactId: contact.id,
+              inboundMessageId: created.id,
               text: inboundText,
             }).catch(() => undefined);
           }

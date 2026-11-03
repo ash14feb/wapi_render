@@ -31,6 +31,11 @@ model Tenant {
   shopifyConnections ShopifyConnection[]
   whatsappFlows     WhatsappFlow[]
   flowResponses     WhatsappFlowResponse[]
+  aiSetting         AiSetting?
+  aiKnowledgeEntries AiKnowledgeEntry[]
+  aiOffers          AiOffer[]
+  aiConversationStates AiConversationState[]
+  aiResponseLogs    AiResponseLog[]
 
   @@map("tenants")
 }
@@ -114,6 +119,7 @@ model Conversation {
   whatsappAccount WhatsappAccount @relation(fields: [whatsappAccountId], references: [id], onDelete: Cascade)
   contact         Contact         @relation(fields: [contactId], references: [id], onDelete: Cascade)
   messages        Message[]
+  aiState         AiConversationState?
 
   @@unique([tenantId, whatsappAccountId, contactId])
   @@index([tenantId])
@@ -335,4 +341,126 @@ model WhatsappFlowResponse {
   @@index([tenantId])
   @@index([tenantId, flowId])
   @@map("whatsapp_flow_responses")
+}
+
+model AiSetting {
+  id                  String    @id @default(cuid())
+  tenantId            String    @unique @map("tenant_id")
+  enabled             Boolean   @default(false)
+  providerBaseUrl     String    @default("https://api.openai.com/v1") @map("provider_base_url")
+  encryptedApiKey     String?   @map("encrypted_api_key") @db.Text
+  apiKeyLast4         String?   @map("api_key_last4")
+  model               String    @default("gpt-4o-mini")
+  temperature         Float     @default(0.7)
+  maxTokens           Int       @default(600) @map("max_tokens")
+  requestTimeoutMs    Int       @default(20000) @map("request_timeout_ms")
+  maxRetries          Int       @default(1) @map("max_retries")
+  historyWindow       Int       @default(12) @map("history_window")
+  systemPrompt        String    @default("") @map("system_prompt") @db.LongText
+  businessInfo        String?   @map("business_info") @db.LongText
+  language            String    @default("auto")
+  tone                String    @default("friendly")
+  humanLike           Boolean   @default(true) @map("human_like")
+  replyDelayMs        Int       @default(0) @map("reply_delay_ms")
+  salesPlaybookJson   String?   @map("sales_playbook_json") @db.LongText
+  discountPolicyJson  String?   @map("discount_policy_json") @db.Text
+  handoffEnabled      Boolean   @default(true) @map("handoff_enabled")
+  handoffInstructions String?   @map("handoff_instructions") @db.Text
+  fallbackMessage     String?   @map("fallback_message") @db.Text
+  lastTestAt          DateTime? @map("last_test_at")
+  lastTestStatus      String?   @map("last_test_status")
+  updatedBy           String?   @map("updated_by")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("ai_settings")
+}
+
+model AiKnowledgeEntry {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  title     String
+  content   String   @db.LongText
+  category  String?
+  active    Boolean  @default(true)
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, active])
+  @@map("ai_knowledge_entries")
+}
+
+model AiOffer {
+  id               String    @id @default(cuid())
+  tenantId         String    @map("tenant_id")
+  name             String
+  code             String?
+  description      String?   @db.Text
+  discountType     String    @default("PERCENT") @map("discount_type")
+  discountValue    Int       @default(0) @map("discount_value")
+  minOrderValue    Int?      @map("min_order_value")
+  maxDiscountValue Int?      @map("max_discount_value")
+  validFrom        DateTime? @map("valid_from")
+  validTo          DateTime? @map("valid_to")
+  active           Boolean   @default(true)
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, code])
+  @@index([tenantId, active])
+  @@map("ai_offers")
+}
+
+model AiConversationState {
+  id                String    @id @default(cuid())
+  tenantId          String    @map("tenant_id")
+  conversationId    String    @unique @map("conversation_id")
+  aiEnabled         Boolean?  @map("ai_enabled")
+  summary           String?   @db.Text
+  factsJson         String?   @map("facts_json") @db.Text
+  turnsSinceSummary Int       @default(0) @map("turns_since_summary")
+  lastAiReplyAt     DateTime? @map("last_ai_reply_at")
+  handoffAt         DateTime? @map("handoff_at")
+  consecutiveErrors Int       @default(0) @map("consecutive_errors")
+  lastError         String?   @map("last_error") @db.Text
+  processingAt      DateTime? @map("processing_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("ai_conversation_states")
+}
+
+model AiResponseLog {
+  id               String   @id @default(cuid())
+  tenantId         String   @map("tenant_id")
+  conversationId   String   @map("conversation_id")
+  inboundMessageId String?  @map("inbound_message_id")
+  outboundMessageId String? @map("outbound_message_id")
+  status           String
+  model            String?
+  latencyMs        Int?     @map("latency_ms")
+  promptTokens     Int?     @map("prompt_tokens")
+  completionTokens Int?     @map("completion_tokens")
+  requestExcerpt   String?  @map("request_excerpt") @db.Text
+  responseExcerpt  String?  @map("response_excerpt") @db.Text
+  errorCode        String?  @map("error_code")
+  errorMessage     String?  @map("error_message") @db.Text
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@index([conversationId])
+  @@map("ai_response_logs")
 }

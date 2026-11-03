@@ -3,6 +3,7 @@ import { config } from "../../config/env";
 import { decryptToken } from "../../utils/crypto";
 import { sendTextMessage } from "../meta/meta-client";
 import { publish, toEventMessage } from "../realtime";
+import { isOptOutRequest, isOptedOut, markOptedOut } from "./optOut";
 
 /**
  * Rule-based chatbot: matches inbound text against tenant BotRules and replies.
@@ -11,7 +12,7 @@ import { publish, toEventMessage } from "../realtime";
  * (whatsappAccountId set) beat global rules at the same match level.
  */
 
-interface BotContext {
+export interface BotContext {
   tenantId: string;
   accountId: string;
   phoneNumberId: string;
@@ -19,6 +20,35 @@ interface BotContext {
   conversationId: string;
   contactId: string;
   text: string;
+}
+
+export interface BotOutcome {
+  attempted: boolean;
+  matchedType: string | null;
+  replySent: boolean;
+  handoff: boolean;
+  skippedReason?: string;
+  error?: string;
+}
+
+export interface BotOptions {
+  /** When the best match is DEFAULT, don't send it yet (AI gets a chance first). */
+  deferDefault?: boolean;
+  /** Only consider DEFAULT rules (used as the final fallback after AI). */
+  defaultRuleOnly?: boolean;
+}
+
+type BotRuleRecord = {
+  id: string;
+  matchType: string;
+  trigger: string;
+  replyText: string;
+  handoff: boolean;
+  whatsappAccountId: string | null;
+};
+
+function skipped(reason: string, attempted = true): BotOutcome {
+  return { attempted, matchedType: null, replySent: false, handoff: false, skippedReason: reason };
 }
 
 function ruleMatches(matchType: string, trigger: string, text: string): boolean {
@@ -32,30 +62,38 @@ function ruleMatches(matchType: string, trigger: string, text: string): boolean 
 
 const RANK: Record<string, number> = { EXACT: 0, STARTS_WITH: 1, CONTAINS: 2, DEFAULT: 3 };
 
-export async function handleInboundBot(ctx: BotContext): Promise<void> {
+export async function handleInboundBot(ctx: BotContext, options: BotOptions = {}): Promise<BotOutcome> {
   const text = ctx.text.trim().toLowerCase();
-  if (!text) return;
+  if (!text) return skipped("empty_text", false);
 
   // Built-in opt-out: STOP/UNSUBSCRIBE tags the contact, no reply.
-  if (text === "stop" || text === "unsubscribe" || text === "opt out" || text === "opt-out") {
-    await prisma.contact.update({
-      where: { id: ctx.contactId },
-      data: { tags: "opted_out" },
-    }).catch(() => undefined);
-    return;
+  if (isOptOutRequest(text)) {
+    await markOptedOut(ctx.contactId).catch(() => undefined);
+    return skipped("opted_out");
   }
+
+  const contact = await prisma.contact.findUnique({
+    where: { id: ctx.contactId },
+    select: { phone: true, tags: true },
+  });
+  // Never auto-reply to a contact that has opted out (defense in depth —
+  // webhook ingestion normally clears the tag on a fresh inbound message).
+  if (!contact) return skipped("contact_not_found");
+  if (isOptedOut(contact.tags)) return skipped("opted_out");
 
   const rules = await prisma.botRule.findMany({
     where: {
       tenantId: ctx.tenantId,
       active: true,
-      OR: [{ whatsappAccountId: null }, { whatsappAccountId: ctx.accountId }],
+      ...(options.defaultRuleOnly
+        ? { matchType: "DEFAULT" }
+        : { OR: [{ whatsappAccountId: null }, { whatsappAccountId: ctx.accountId }] }),
     },
     orderBy: { sortOrder: "asc" },
     take: 100,
   });
 
-  let best: (typeof rules[number]) | null = null;
+  let best: BotRuleRecord | null = null;
   let bestRank = Number.POSITIVE_INFINITY;
   for (const r of rules) {
     if (!ruleMatches(r.matchType, r.trigger, text)) continue;
@@ -66,7 +104,18 @@ export async function handleInboundBot(ctx: BotContext): Promise<void> {
       bestRank = rank;
     }
   }
-  if (!best) return;
+  if (!best) return skipped("no_match");
+
+  // AI fallback sits between specific keyword rules and the DEFAULT rule.
+  if (best.matchType === "DEFAULT" && options.deferDefault) {
+    return {
+      attempted: true,
+      matchedType: "DEFAULT",
+      replySent: false,
+      handoff: false,
+      skippedReason: "deferred_default",
+    };
+  }
 
   // Handoff: mark conversation for a human instead of replying.
   if (best.handoff) {
@@ -75,14 +124,22 @@ export async function handleInboundBot(ctx: BotContext): Promise<void> {
       data: { status: "PENDING_HUMAN" },
     }).catch(() => undefined);
     publish(ctx.tenantId, { type: "conversation.updated", conversationId: ctx.conversationId });
-    if (!best.replyText.trim()) return; // handoff-only rule, no auto message
+    if (!best.replyText.trim()) {
+      return { attempted: true, matchedType: best.matchType, replySent: false, handoff: true };
+    }
   }
 
   let accessToken: string;
   try {
     accessToken = decryptToken(ctx.encryptedAccessToken);
   } catch {
-    return;
+    return {
+      attempted: true,
+      matchedType: best.matchType,
+      replySent: false,
+      handoff: false,
+      error: "credential_decrypt_failed",
+    };
   }
   let whatsappMessageId: string;
   try {
@@ -90,11 +147,17 @@ export async function handleInboundBot(ctx: BotContext): Promise<void> {
       phoneNumberId: ctx.phoneNumberId,
       accessToken,
       graphVersion: config.meta.graphVersion,
-      to: (await prisma.contact.findUnique({ where: { id: ctx.contactId }, select: { phone: true } }))?.phone ?? "",
+      to: contact.phone,
       body: best.replyText,
     });
-  } catch {
-    return;
+  } catch (err) {
+    return {
+      attempted: true,
+      matchedType: best.matchType,
+      replySent: false,
+      handoff: best.handoff,
+      error: err instanceof Error ? err.message : "send_failed",
+    };
   } finally {
     accessToken = "";
   }
@@ -124,4 +187,6 @@ export async function handleInboundBot(ctx: BotContext): Promise<void> {
   } catch {
     // reply sent on Meta but not persisted — acceptable, webhook status update will reconcile
   }
+
+  return { attempted: true, matchedType: best.matchType, replySent: true, handoff: best.handoff };
 }

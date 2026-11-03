@@ -4,6 +4,7 @@ import { decryptToken } from "../../utils/crypto";
 import { sendMediaMessage, sendTextMessage } from "../meta/meta-client";
 import { publish, toEventMessage } from "../realtime";
 import { WhatsappServiceError } from "./whatsapp.service";
+import { isOptedOut, OPTED_OUT_MESSAGE } from "./optOut";
 import type { SendMessageInput } from "../../validators/conversations.validator";
 
 const PAGE_SIZE = 50;
@@ -67,7 +68,7 @@ export async function getConversation(tenantId: string, id: string) {
   const conversation = await prisma.conversation.findFirst({
     where: { id, tenantId },
     include: {
-      contact: { select: { id: true, phone: true, name: true, profileName: true } },
+      contact: { select: { id: true, phone: true, name: true, profileName: true, tags: true } },
       whatsappAccount: { select: { id: true, businessName: true, displayPhoneNumber: true } },
     },
   });
@@ -115,6 +116,9 @@ export async function sendConversationMessage(
   });
   if (!conversation) {
     throw new WhatsappServiceError("CONVERSATION_NOT_FOUND", "Conversation not found", 404);
+  }
+  if (isOptedOut(conversation.contact.tags)) {
+    throw new WhatsappServiceError("CONTACT_OPTED_OUT", OPTED_OUT_MESSAGE, 403);
   }
 
   const isMedia = "mediaKind" in input;
@@ -178,6 +182,16 @@ export async function sendConversationMessage(
     conversationId: conversation.id,
     message: toEventMessage(saved),
   });
+
+  // A human replied manually: keep the AI agent out of this conversation until
+  // someone re-enables it from the inbox.
+  await prisma.aiConversationState
+    .upsert({
+      where: { conversationId: conversation.id },
+      update: { aiEnabled: false },
+      create: { tenantId, conversationId: conversation.id, aiEnabled: false },
+    })
+    .catch(() => undefined);
 
   return { whatsappMessageId, messageId: saved.id };
 }

@@ -16,6 +16,7 @@ import { botsRouter } from "./routes/bots.routes";
 import { shopifyRouter } from "./routes/shopify.routes";
 import { instagramRouter } from "./routes/instagram.routes";
 import { flowsRouter } from "./routes/flows.routes";
+import { aiRouter } from "./routes/ai.routes";
 import { errorHandler } from "./middleware/errorHandler";
 
 export function createApp(): express.Express {
@@ -73,6 +74,7 @@ export function createApp(): express.Express {
   app.use("/api/v1", shopifyRouter);
   app.use("/api/v1", instagramRouter);
   app.use("/api/v1", flowsRouter);
+  app.use("/api/v1", aiRouter);
 
   app.use(errorHandler);
 

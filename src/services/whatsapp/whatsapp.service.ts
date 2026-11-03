@@ -3,6 +3,7 @@ import { config } from "../../config/env";
 import { decryptToken } from "../../utils/crypto";
 import { sendTemplateMessage } from "../meta/meta-client";
 import { publish, toEventMessage } from "../realtime";
+import { isOptedOut, OPTED_OUT_MESSAGE } from "./optOut";
 import type { SendTemplateInput } from "../../validators/whatsapp.validator";
 
 export class WhatsappServiceError extends Error {
@@ -34,6 +35,14 @@ export async function sendTemplate(
     throw new WhatsappServiceError("WHATSAPP_ACCOUNT_NOT_FOUND", "No WhatsApp account found for tenant", 404);
   }
 
+  const existingContact = await prisma.contact.findUnique({
+    where: { tenantId_phone: { tenantId, phone: input.to } },
+    select: { id: true, tags: true },
+  });
+  if (existingContact && isOptedOut(existingContact.tags)) {
+    throw new WhatsappServiceError("CONTACT_OPTED_OUT", OPTED_OUT_MESSAGE, 403);
+  }
+
   let accessToken: string;
   try {
     accessToken = decryptToken(account.encryptedAccessToken);
@@ -61,11 +70,13 @@ export async function sendTemplate(
   }
 
   // Persist outbound message with tenant isolation.
-  const contact = await prisma.contact.upsert({
-    where: { tenantId_phone: { tenantId, phone: input.to } },
-    update: {},
-    create: { tenantId, phone: input.to },
-  });
+  const contact =
+    existingContact ??
+    (await prisma.contact.upsert({
+      where: { tenantId_phone: { tenantId, phone: input.to } },
+      update: {},
+      create: { tenantId, phone: input.to },
+    }));
 
   const conversation = await prisma.conversation.upsert({
     where: {

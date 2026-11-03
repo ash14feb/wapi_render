@@ -3,6 +3,7 @@ import { config } from "../../config/env";
 import { decryptToken } from "../../utils/crypto";
 import { sendTemplateMessage } from "../meta/meta-client";
 import { publish } from "../realtime";
+import { isOptedOut } from "./optOut";
 
 const SEND_GAP_MS = 400;
 const running = new Set<string>();
@@ -206,6 +207,17 @@ export async function processCampaign(campaignId: string, sendFn: CampaignSendFn
         if (batch.length === 0) break;
 
         for (const recipient of batch) {
+
+        // Suppression: a contact that replied STOP must never receive a
+        // campaign. Skipped recipients are recorded as CANCELLED so the
+        // progress totals stay accurate.
+        if (isOptedOut(recipient.contact.tags)) {
+          await prisma.campaignRecipient.update({
+            where: { id: recipient.id },
+            data: { status: "CANCELLED", errorMessage: "Contact opted out (replied STOP)" },
+          });
+          continue;
+        }
 
         try {
           const wamid = await sendFn({
