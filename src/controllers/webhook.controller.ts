@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { parseVerifyQuery, verifyMetaSignature } from "../utils/webhook";
 import { processWebhookEvent } from "../services/whatsapp/webhook.service";
+import { webhookPayloadSchema } from "../validators/webhook.validator";
 import { sendError, sendSuccess } from "../utils/response";
 
 /** GET /api/v1/webhooks/whatsapp — Meta challenge verification. */
@@ -15,10 +16,10 @@ export function verifyWebhook(req: Request, res: Response): void {
 
 /**
  * POST /api/v1/webhooks/whatsapp — receive events.
- * Validates signature (when META_APP_SECRET is configured), then persists
- * quickly and returns 200. Never logs secrets.
+ * Validates the signature, acknowledges within milliseconds, then processes
+ * asynchronously. Idempotency (wamid dedupe) makes Meta's retries safe.
  */
-export async function receiveWebhook(req: Request, res: Response): Promise<void> {
+export function receiveWebhook(req: Request, res: Response): void {
   const appSecret = process.env.META_APP_SECRET ?? "";
 
   if (appSecret) {
@@ -30,15 +31,17 @@ export async function receiveWebhook(req: Request, res: Response): Promise<void>
     }
   }
 
-  // Acknowledge fast; process inline (lightweight DB writes only).
-  try {
-    const summary = await processWebhookEvent({ payload: req.body });
-    sendSuccess(res, { ack: true, ...summary });
-  } catch {
-    // Never fail the webhook with a 500 on transient DB errors — Meta retries.
-    // Still return 200 with received:true so retries don't pile up; the raw
-    // event loss is acceptable only if DB is down, in which case Meta's retry
-    // will redeliver (idempotency dedupes).
-    sendSuccess(res, { ack: true, applied: 0, duplicates: 0, unresolved: 0 });
+  const payload = req.body;
+  const parsed = webhookPayloadSchema.safeParse(payload);
+  if (!parsed.success) {
+    // Not a Meta messages payload: persist for diagnosis, still ack.
+    void processWebhookEvent({ payload }).catch(() => undefined);
+    sendSuccess(res, { ack: true });
+    return;
   }
+
+  setImmediate(() => {
+    void processWebhookEvent({ payload }).catch(() => undefined);
+  });
+  sendSuccess(res, { ack: true });
 }

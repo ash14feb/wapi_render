@@ -2,10 +2,12 @@ import { prisma } from "../../config/prisma";
 import { config } from "../../config/env";
 import { decryptToken } from "../../utils/crypto";
 import { sendMediaMessage, sendTextMessage } from "../meta/meta-client";
-import { publish, toEventMessage } from "../realtime";
+import { publish, toEventMessage, type RealtimeMessage } from "../realtime";
 import { WhatsappServiceError } from "./whatsapp.service";
 import { isOptedOut, OPTED_OUT_MESSAGE } from "./optOut";
 import type { SendMessageInput } from "../../validators/conversations.validator";
+
+type MessageDto = RealtimeMessage;
 
 const PAGE_SIZE = 50;
 
@@ -102,16 +104,24 @@ export async function sendConversationText(
   return sendConversationMessage(tenantId, conversationId, { text });
 }
 
+/**
+ * Persists the outbound row as SENDING *before* calling Meta, so the reply is
+ * visible to every inbox immediately and a failure is recorded as FAILED on
+ * the same row. The caller gets the row id back as soon as Meta accepts.
+ */
 export async function sendConversationMessage(
   tenantId: string,
   conversationId: string,
   input: SendMessageInput,
-): Promise<{ whatsappMessageId: string; messageId: string }> {
+): Promise<{ whatsappMessageId: string; messageId: string; message: MessageDto }> {
   const conversation = await prisma.conversation.findFirst({
     where: { id: conversationId, tenantId },
-    include: {
-      contact: true,
-      whatsappAccount: true,
+    select: {
+      id: true,
+      contact: { select: { phone: true, tags: true } },
+      whatsappAccount: {
+        select: { phoneNumberId: true, encryptedAccessToken: true },
+      },
     },
   });
   if (!conversation) {
@@ -132,6 +142,24 @@ export async function sendConversationMessage(
     throw new WhatsappServiceError("WHATSAPP_CREDENTIAL_ERROR", "Unable to decrypt WhatsApp credential", 500);
   }
 
+  const pending = await prisma.message.create({
+    data: {
+      tenantId,
+      conversationId: conversation.id,
+      direction: "OUTBOUND",
+      messageType,
+      textContent,
+      ...(isMedia && input.mediaId ? { mediaId: input.mediaId } : {}),
+      status: "SENDING",
+      messageTimestamp: new Date(),
+    },
+  });
+  publish(tenantId, {
+    type: "message.created",
+    conversationId: conversation.id,
+    message: toEventMessage(pending),
+  });
+
   let whatsappMessageId: string;
   try {
     const common = {
@@ -151,37 +179,39 @@ export async function sendConversationMessage(
         })
       : await sendTextMessage({ ...common, body: (input as { text: string }).text });
   } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : "Meta send failed";
+    await prisma.message
+      .update({
+        where: { id: pending.id },
+        data: { status: "FAILED", errorMessage: errorMessage.slice(0, 2000) },
+      })
+      .catch(() => undefined);
+    publish(tenantId, {
+      type: "message.updated",
+      conversationId: conversation.id,
+      message: toEventMessage({ ...pending, status: "FAILED" }),
+    });
     throw new WhatsappServiceError(
       "WHATSAPP_SEND_FAILED",
-      err instanceof Error ? err.message : "Meta send failed",
+      errorMessage,
       (err as { status?: number }).status ?? 502,
     );
   } finally {
     accessToken = "";
   }
 
-  const saved = await prisma.message.create({
-    data: {
-      tenantId,
-      conversationId: conversation.id,
-      whatsappMessageId,
-      direction: "OUTBOUND",
-      messageType,
-      textContent,
-      ...(isMedia && input.mediaId ? { mediaId: input.mediaId } : {}),
-      status: "SENT",
-      messageTimestamp: new Date(),
-    },
-  });
-  await prisma.conversation.update({
-    where: { id: conversation.id },
-    data: { lastMessageAt: new Date() },
+  const saved = await prisma.message.update({
+    where: { id: pending.id },
+    data: { whatsappMessageId, status: "SENT" },
   });
   publish(tenantId, {
-    type: "message.created",
+    type: "message.updated",
     conversationId: conversation.id,
     message: toEventMessage(saved),
   });
+  void prisma.conversation
+    .update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } })
+    .catch(() => undefined);
 
-  return { whatsappMessageId, messageId: saved.id };
+  return { whatsappMessageId, messageId: saved.id, message: toEventMessage(saved) };
 }

@@ -3,7 +3,9 @@ import { webhookPayloadSchema } from "../../validators/webhook.validator";
 import { publish, toEventMessage } from "../realtime";
 import { summarizeFlowResponse } from "../../utils/flowBuilder";
 import { handleInboundAutomation } from "./automation";
-import { clearOptOut, isOptOutRequest, isOptedOut, markOptedOut } from "./optOut";
+import { clearOptOut, isOptOutRequest, isOptedOut, markOptedOut, splitTags, OPTED_OUT_TAG } from "./optOut";
+import { showTypingIndicator } from "./typing";
+import type { BotContact } from "./botEngine";
 
 const STATUS_MAP: Record<string, string> = {
   sent: "SENT",
@@ -49,6 +51,19 @@ function messageMediaId(m: {
   return m.image?.id ?? m.video?.id ?? m.document?.id ?? m.audio?.id ?? m.sticker?.id;
 }
 
+/** Cheap in-memory dedupe for status callbacks (Redis pub/sub replaces it when multi-instance). */
+const seenStatusKeys = new Set<string>();
+function statusKeySeen(key: string): boolean {
+  if (seenStatusKeys.has(key)) return true;
+  seenStatusKeys.add(key);
+  if (seenStatusKeys.size > 20_000) seenStatusKeys.clear();
+  return false;
+}
+
+function recordEvent(data: Parameters<typeof prisma.webhookEvent.create>[0]["data"]): void {
+  void prisma.webhookEvent.create({ data }).catch(() => undefined);
+}
+
 /**
  * Persist + apply one Meta webhook payload.
  * Idempotent: duplicate deliveries (same wamid) do not create duplicate messages.
@@ -65,15 +80,12 @@ export async function processWebhookEvent(input: {
   let unresolved = 0;
 
   if (!parsed.success) {
-    await prisma.webhookEvent.create({
-      data: {
-        tenantId: null,
-        eventType: "whatsapp.unknown",
-        externalEventId: null,
-        payloadJson: rawJson,
-        processingStatus: "FAILED",
-        errorMessage: "Unrecognized webhook payload shape",
-      },
+    recordEvent({
+      tenantId: null,
+      eventType: "whatsapp.unknown",
+      payloadJson: rawJson,
+      processingStatus: "FAILED",
+      errorMessage: "Unrecognized webhook payload shape",
     });
     return { received: 0, applied: 0, duplicates: 0, unresolved: 1 };
   }
@@ -82,13 +94,24 @@ export async function processWebhookEvent(input: {
     for (const change of entry.changes ?? []) {
       const value = change.value;
       if (!value) continue;
-      const phoneNumberId = value.metadata?.phone_number_id;
 
+      const hasMessages = (value.messages ?? []).length > 0;
+      const hasStatuses = (value.statuses ?? []).length > 0;
+      if (!hasMessages && !hasStatuses) continue;
+
+      const phoneNumberId = value.metadata?.phone_number_id;
       const account = phoneNumberId
-        ? await prisma.whatsappAccount.findFirst({ where: { phoneNumberId } })
+        ? await prisma.whatsappAccount.findFirst({
+            where: { phoneNumberId },
+            select: {
+              id: true,
+              tenantId: true,
+              phoneNumberId: true,
+              encryptedAccessToken: true,
+            },
+          })
         : null;
       const tenantId = account?.tenantId ?? null;
-
       const profileName = value.contacts?.[0]?.profile?.name;
 
       for (const m of value.messages ?? []) {
@@ -96,15 +119,13 @@ export async function processWebhookEvent(input: {
         const externalId = m.id;
         if (!account || !tenantId) {
           unresolved += 1;
-          await prisma.webhookEvent.create({
-            data: {
-              tenantId: null,
-              eventType: "whatsapp.message.inbound",
-              externalEventId: `${phoneNumberId ?? "unknown"}:${externalId}`,
-              payloadJson: JSON.stringify(m).slice(0, 65535),
-              processingStatus: "UNRESOLVED_TENANT",
-              errorMessage: "No WhatsApp account matched phone_number_id",
-            },
+          recordEvent({
+            tenantId: null,
+            eventType: "whatsapp.message.inbound",
+            externalEventId: `${phoneNumberId ?? "unknown"}:${externalId}`,
+            payloadJson: JSON.stringify(m).slice(0, 65535),
+            processingStatus: "UNRESOLVED_TENANT",
+            errorMessage: "No WhatsApp account matched phone_number_id",
           });
           continue;
         }
@@ -112,6 +133,7 @@ export async function processWebhookEvent(input: {
         // Idempotency: wamid unique per tenant.
         const existing = await prisma.message.findUnique({
           where: { tenantId_whatsappMessageId: { tenantId, whatsappMessageId: externalId } },
+          select: { id: true },
         });
         if (existing) {
           duplicates += 1;
@@ -130,10 +152,15 @@ export async function processWebhookEvent(input: {
         // Opt-out lifecycle: applied synchronously so a STOP is recorded even if
         // the async bot engine never runs. Messaging the business again
         // re-subscribes a contact that previously opted out.
+        let contactTags = contact.tags;
         if (inboundText && isOptOutRequest(inboundText)) {
           await markOptedOut(contact.id).catch(() => undefined);
+          contactTags = contactTags ? `${contactTags},opted_out` : "opted_out";
         } else if (inboundText && isOptedOut(contact.tags)) {
           await clearOptOut(contact.id).catch(() => undefined);
+          contactTags = splitTags(contact.tags)
+            .filter((t) => t.toLowerCase() !== OPTED_OUT_TAG)
+            .join(",") || null;
         }
 
         const conversation = await prisma.conversation.upsert({
@@ -152,90 +179,78 @@ export async function processWebhookEvent(input: {
             status: "OPEN",
             lastMessageAt: new Date(),
           },
+          select: { id: true },
         });
 
+        let created: { id: string; conversationId: string; direction: string; messageType: string; textContent: string | null; status: string; messageTimestamp: Date | null; createdAt: Date };
         try {
-          const [created] = await prisma.$transaction([
-            prisma.message.create({
-              data: {
-                tenantId,
-                conversationId: conversation.id,
-                whatsappMessageId: externalId,
-                direction: "INBOUND",
-                messageType: (m.type ?? "TEXT").toUpperCase(),
-                textContent: messageText(m),
-                mediaId: messageMediaId(m),
-                status: "RECEIVED",
-                messageTimestamp: toDate(m.timestamp),
-              },
-            }),
-            prisma.webhookEvent.create({
-              data: {
-                tenantId,
-                eventType: "whatsapp.message.inbound",
-                externalEventId: externalId,
-                payloadJson: JSON.stringify(m).slice(0, 65535),
-                processingStatus: "PROCESSED",
-                processedAt: new Date(),
-              },
-            }),
-          ]);
-          applied += 1;
-          // Flow form answers (nfm_reply): store as flow response, attributed
-          // to the most recent flow sent to this phone (24h window).
-          const nfm = (m as { interactive?: { nfm_reply?: { response_json?: string } } }).interactive?.nfm_reply;
-          if (nfm?.response_json) {
-            try {
-              const since = new Date(Date.now() - 24 * 3600 * 1000);
-              const sent = await prisma.webhookEvent.findFirst({
-                where: { tenantId, eventType: "whatsapp.flow.sent", receivedAt: { gte: since }, payloadJson: { contains: phone } },
-                orderBy: { receivedAt: "desc" },
-              });
-              let flowId: string | null = null;
-              try {
-                flowId = (JSON.parse(sent?.payloadJson ?? "{}") as { flowId?: string }).flowId ?? null;
-              } catch { /* keep null */ }
-              await prisma.whatsappFlowResponse.create({
-                data: { tenantId, flowId, phone, responseJson: nfm.response_json.slice(0, 20000) },
-              });
-              await prisma.webhookEvent.create({
-                data: { tenantId, eventType: "whatsapp.flow.response", externalEventId: externalId, payloadJson: JSON.stringify({ flowId, phone, response: JSON.parse(nfm.response_json) }).slice(0, 20000), processingStatus: "PROCESSED", processedAt: new Date() },
-              });
-            } catch { /* best-effort only */ }
-          }
-          publish(tenantId, {
-            type: "message.created",
-            conversationId: conversation.id,
-            message: toEventMessage(created),
-          });
-          // Rules → AI → default rule: fire-and-forget, never blocks webhook 200.
-          if (inboundText) {
-            void handleInboundAutomation({
+          created = await prisma.message.create({
+            data: {
               tenantId,
-              accountId: account.id,
-              phoneNumberId: account.phoneNumberId,
-              encryptedAccessToken: account.encryptedAccessToken,
               conversationId: conversation.id,
-              contactId: contact.id,
-              inboundMessageId: created.id,
-              text: inboundText,
-            }).catch(() => undefined);
-          }
+              whatsappMessageId: externalId,
+              direction: "INBOUND",
+              messageType: (m.type ?? "TEXT").toUpperCase(),
+              textContent: inboundText,
+              mediaId: messageMediaId(m),
+              status: "RECEIVED",
+              messageTimestamp: toDate(m.timestamp),
+            },
+          });
+          applied += 1;
         } catch (err) {
           // Unique-conflict race on retry → duplicate, not an error.
-          if ((err as { code?: string }).code === "P2002") duplicates += 1;
-          else {
-            await prisma.webhookEvent.create({
-              data: {
-                tenantId,
-                eventType: "whatsapp.message.inbound",
-                externalEventId: externalId,
-                payloadJson: JSON.stringify(m).slice(0, 65535),
-                processingStatus: "FAILED",
-                errorMessage: err instanceof Error ? err.message : "persist failed",
-              },
+          if ((err as { code?: string }).code === "P2002") {
+            duplicates += 1;
+          } else {
+            recordEvent({
+              tenantId,
+              eventType: "whatsapp.message.inbound",
+              externalEventId: externalId,
+              payloadJson: JSON.stringify(m).slice(0, 65535),
+              processingStatus: "FAILED",
+              errorMessage: err instanceof Error ? err.message : "persist failed",
             });
           }
+          continue;
+        }
+
+        publish(tenantId, {
+          type: "message.created",
+          conversationId: conversation.id,
+          message: toEventMessage(created),
+        });
+
+        const nfm = (m as { interactive?: { nfm_reply?: { response_json?: string } } }).interactive?.nfm_reply;
+        if (nfm?.response_json) void recordFlowResponse(tenantId, externalId, phone, nfm.response_json);
+
+        // Rules → AI → default rule: fire-and-forget, never blocks webhook 200.
+        if (inboundText) {
+          if (!isOptedOut(contactTags)) {
+            showTypingIndicator({
+              conversationId: conversation.id,
+              phoneNumberId: account.phoneNumberId,
+              encryptedAccessToken: account.encryptedAccessToken,
+              inboundWamid: externalId,
+            });
+          }
+          const botContact: BotContact = {
+            id: contact.id,
+            phone: contact.phone,
+            tags: contactTags,
+          };
+          void handleInboundAutomation({
+            tenantId,
+            accountId: account.id,
+            phoneNumberId: account.phoneNumberId,
+            encryptedAccessToken: account.encryptedAccessToken,
+            conversationId: conversation.id,
+            contactId: contact.id,
+            contact: botContact,
+            inboundWamid: externalId,
+            inboundMessageId: created.id,
+            text: inboundText,
+          }).catch(() => undefined);
         }
       }
 
@@ -249,56 +264,42 @@ export async function processWebhookEvent(input: {
         const mapped = STATUS_MAP[(s.status ?? "").toLowerCase()];
         if (!mapped) continue;
 
-        const existingEvent = await prisma.webhookEvent.findFirst({
-          where: { tenantId, externalEventId: `status:${externalId}:${mapped}` },
-        });
-        if (existingEvent) {
+        const statusEventKey = `status:${externalId}:${mapped}`;
+        if (statusKeySeen(statusEventKey)) {
           duplicates += 1;
           continue;
         }
 
         const target = await prisma.message.findUnique({
           where: { tenantId_whatsappMessageId: { tenantId, whatsappMessageId: externalId } },
+          select: { id: true, conversationId: true, errorCode: true, errorMessage: true },
         });
         const errTitle = s.errors?.[0]?.title;
         const errCode = s.errors?.[0]?.code?.toString();
         if (target) {
-          const [updated] = await prisma.$transaction([
-            prisma.message.update({
-              where: { id: target.id },
-              data: {
-                status: mapped,
-                errorCode: errCode ?? (mapped === "FAILED" ? target.errorCode : null),
-                errorMessage: errTitle ?? (mapped === "FAILED" ? target.errorMessage : null),
-              },
-            }),
-            prisma.webhookEvent.create({
-              data: {
-                tenantId,
-                eventType: "whatsapp.message.status",
-                externalEventId: `status:${externalId}:${mapped}`,
-                payloadJson: JSON.stringify(s).slice(0, 65535),
-                processingStatus: "PROCESSED",
-                processedAt: new Date(),
-              },
-            }),
-          ]);
+          const updated = await prisma.message.update({
+            where: { id: target.id },
+            data: {
+              status: mapped,
+              errorCode: errCode ?? (mapped === "FAILED" ? target.errorCode : null),
+              errorMessage: errTitle ?? (mapped === "FAILED" ? target.errorMessage : null),
+            },
+          });
           publish(tenantId, {
             type: "message.updated",
             conversationId: target.conversationId,
             message: toEventMessage(updated),
           });
-        } else {
-          // Status for unknown message: record event, resolve later if message arrives.
-          await prisma.webhookEvent.create({
-            data: {
-              tenantId,
-              eventType: "whatsapp.message.status",
-              externalEventId: `status:${externalId}:${mapped}`,
-              payloadJson: JSON.stringify(s).slice(0, 65535),
-              processingStatus: "PROCESSED",
-              processedAt: new Date(),
-            },
+        }
+        // Unknown message: the status arrived before our row — record for replay.
+        if (!target || mapped === "FAILED") {
+          recordEvent({
+            tenantId,
+            eventType: "whatsapp.message.status",
+            externalEventId: statusEventKey,
+            payloadJson: JSON.stringify(s).slice(0, 65535),
+            processingStatus: "PROCESSED",
+            processedAt: new Date(),
           });
         }
         applied += 1;
@@ -307,4 +308,38 @@ export async function processWebhookEvent(input: {
   }
 
   return { received, applied, duplicates, unresolved };
+}
+
+/** Flow form answers (nfm_reply): attributed to the most recent flow sent to this phone (24h). */
+async function recordFlowResponse(
+  tenantId: string,
+  externalId: string,
+  phone: string,
+  responseJson: string,
+): Promise<void> {
+  try {
+    const since = new Date(Date.now() - 24 * 3600 * 1000);
+    const sent = await prisma.webhookEvent.findFirst({
+      where: { tenantId, eventType: "whatsapp.flow.sent", receivedAt: { gte: since }, payloadJson: { contains: phone } },
+      orderBy: { receivedAt: "desc" },
+      select: { payloadJson: true },
+    });
+    let flowId: string | null = null;
+    try {
+      flowId = (JSON.parse(sent?.payloadJson ?? "{}") as { flowId?: string }).flowId ?? null;
+    } catch { /* keep null */ }
+    await prisma.whatsappFlowResponse.create({
+      data: { tenantId, flowId, phone, responseJson: responseJson.slice(0, 20000) },
+    });
+    await prisma.webhookEvent.create({
+      data: {
+        tenantId,
+        eventType: "whatsapp.flow.response",
+        externalEventId: externalId,
+        payloadJson: JSON.stringify({ flowId, phone, response: JSON.parse(responseJson) }).slice(0, 20000),
+        processingStatus: "PROCESSED",
+        processedAt: new Date(),
+      },
+    });
+  } catch { /* best-effort only */ }
 }

@@ -12,6 +12,12 @@ import { isOptOutRequest, isOptedOut, markOptedOut } from "./optOut";
  * (whatsappAccountId set) beat global rules at the same match level.
  */
 
+export interface BotContact {
+  id: string;
+  phone: string;
+  tags: string | null;
+}
+
 export interface BotContext {
   tenantId: string;
   accountId: string;
@@ -19,6 +25,12 @@ export interface BotContext {
   encryptedAccessToken: string;
   conversationId: string;
   contactId: string;
+  /** Freshly-loaded contact from webhook ingestion; avoids a refetch per message. */
+  contact?: BotContact;
+  /** Live rules snapshot resolved by the caller (shared across bot + default passes). */
+  rules?: BotRuleRecord[];
+  /** Inbound wamid, used to refresh the typing indicator during slow sends. */
+  inboundWamid?: string;
   text: string;
 }
 
@@ -38,7 +50,7 @@ export interface BotOptions {
   defaultRuleOnly?: boolean;
 }
 
-type BotRuleRecord = {
+export type BotRuleRecord = {
   id: string;
   matchType: string;
   trigger: string;
@@ -72,26 +84,33 @@ export async function handleInboundBot(ctx: BotContext, options: BotOptions = {}
     return skipped("opted_out");
   }
 
-  const contact = await prisma.contact.findUnique({
-    where: { id: ctx.contactId },
-    select: { phone: true, tags: true },
-  });
+  const contact =
+    ctx.contact ??
+    (await prisma.contact.findUnique({
+      where: { id: ctx.contactId },
+      select: { id: true, phone: true, tags: true },
+    }));
   // Never auto-reply to a contact that has opted out (defense in depth —
   // webhook ingestion normally clears the tag on a fresh inbound message).
   if (!contact) return skipped("contact_not_found");
   if (isOptedOut(contact.tags)) return skipped("opted_out");
 
-  const rules = await prisma.botRule.findMany({
-    where: {
-      tenantId: ctx.tenantId,
-      active: true,
-      ...(options.defaultRuleOnly
-        ? { matchType: "DEFAULT" }
-        : { OR: [{ whatsappAccountId: null }, { whatsappAccountId: ctx.accountId }] }),
-    },
-    orderBy: { sortOrder: "asc" },
-    take: 100,
-  });
+  const allRules =
+    ctx.rules ??
+    (await prisma.botRule.findMany({
+      where: {
+        tenantId: ctx.tenantId,
+        active: true,
+        ...(options.defaultRuleOnly
+          ? { matchType: "DEFAULT" }
+          : { OR: [{ whatsappAccountId: null }, { whatsappAccountId: ctx.accountId }] }),
+      },
+      orderBy: { sortOrder: "asc" },
+      take: 100,
+    }));
+  const rules = options.defaultRuleOnly
+    ? allRules.filter((r) => r.matchType === "DEFAULT")
+    : allRules;
 
   let best: BotRuleRecord | null = null;
   let bestRank = Number.POSITIVE_INFINITY;
@@ -175,15 +194,14 @@ export async function handleInboundBot(ctx: BotContext, options: BotOptions = {}
         messageTimestamp: new Date(),
       },
     });
-    await prisma.conversation.update({
-      where: { id: ctx.conversationId },
-      data: { lastMessageAt: new Date() },
-    });
     publish(ctx.tenantId, {
       type: "message.created",
       conversationId: ctx.conversationId,
       message: toEventMessage(saved),
     });
+    void prisma.conversation
+      .update({ where: { id: ctx.conversationId }, data: { lastMessageAt: new Date() } })
+      .catch(() => undefined);
   } catch {
     // reply sent on Meta but not persisted — acceptable, webhook status update will reconcile
   }

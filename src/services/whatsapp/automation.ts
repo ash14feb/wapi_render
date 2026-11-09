@@ -1,5 +1,6 @@
+import { prisma } from "../../config/prisma";
 import { handleInboundAi, type AiInboundContext, type AiOutcome } from "../ai/aiResponder";
-import { handleInboundBot, type BotContext, type BotOutcome } from "./botEngine";
+import { handleInboundBot, type BotContext, type BotOutcome, type BotRuleRecord } from "./botEngine";
 
 /**
  * Inbound automation precedence:
@@ -19,10 +20,35 @@ export interface AutomationOutcome {
   ai?: AiOutcome;
 }
 
+async function loadRules(ctx: BotContext): Promise<BotRuleRecord[]> {
+  if (ctx.rules) return ctx.rules;
+  return prisma.botRule.findMany({
+    where: {
+      tenantId: ctx.tenantId,
+      active: true,
+      OR: [{ whatsappAccountId: null }, { whatsappAccountId: ctx.accountId }],
+    },
+    orderBy: { sortOrder: "asc" },
+    select: {
+      id: true,
+      matchType: true,
+      trigger: true,
+      replyText: true,
+      handoff: true,
+      whatsappAccountId: true,
+    },
+    take: 100,
+  });
+}
+
 export async function handleInboundAutomation(
   ctx: InboundAutomationContext,
 ): Promise<AutomationOutcome> {
-  const bot = await handleInboundBot(ctx, { deferDefault: true });
+  // One rules read is shared by the keyword pass and the DEFAULT fallback pass.
+  const rules = await loadRules(ctx);
+  const botCtx: BotContext = { ...ctx, rules };
+
+  const bot = await handleInboundBot(botCtx, { deferDefault: true });
   if (bot.replySent || bot.handoff) return { source: "BOT", bot };
 
   // A specific rule matched but its send failed: don't try a second reply path.
@@ -42,6 +68,8 @@ export async function handleInboundAutomation(
     encryptedAccessToken: ctx.encryptedAccessToken,
     conversationId: ctx.conversationId,
     contactId: ctx.contactId,
+    contact: ctx.contact,
+    inboundWamid: ctx.inboundWamid,
     inboundMessageId: ctx.inboundMessageId,
     text: ctx.text,
   };
@@ -65,7 +93,7 @@ export async function handleInboundAutomation(
   }
 
   if (ai.attempted || bot.matchedType === "DEFAULT") {
-    const fallback = await handleInboundBot(ctx, { defaultRuleOnly: true });
+    const fallback = await handleInboundBot(botCtx, { defaultRuleOnly: true });
     if (fallback.replySent || fallback.handoff) return { source: "DEFAULT", bot, ai };
   }
 

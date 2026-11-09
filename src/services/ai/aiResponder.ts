@@ -4,6 +4,7 @@ import { decryptToken } from "../../utils/crypto";
 import { sendTextMessage } from "../meta/meta-client";
 import { publish, toEventMessage } from "../realtime";
 import { isOptedOut } from "../whatsapp/optOut";
+import { showTypingIndicator, clearTypingIndicator } from "../whatsapp/typing";
 import { loadActiveKnowledge, loadActiveOffers, loadBusinessName } from "./aiContext.service";
 import { getRuntimeAiConfig, type AiServiceError } from "./aiSettings.service";
 import { AiProviderError, chatCompletion, isOfficialOpenAi } from "./openaiClient";
@@ -24,6 +25,10 @@ export interface AiInboundContext {
   encryptedAccessToken: string;
   conversationId: string;
   contactId: string;
+  /** Contact snapshot from ingestion (falls back to a DB read when absent). */
+  contact?: { id: string; phone: string; tags: string | null };
+  /** Inbound wamid for typing-indicator refreshes. */
+  inboundWamid?: string;
   inboundMessageId: string;
   text: string;
 }
@@ -49,11 +54,15 @@ function excerpt(value: string | null | undefined, max = 2000): string | null {
 }
 
 async function ensureState(tenantId: string, conversationId: string) {
-  return prisma.aiConversationState.upsert({
-    where: { conversationId },
-    update: {},
-    create: { tenantId, conversationId },
-  });
+  const existing = await prisma.aiConversationState.findUnique({ where: { conversationId } });
+  if (existing) return existing;
+  return prisma.aiConversationState
+    .create({ data: { tenantId, conversationId } })
+    .catch(async () => {
+      const raced = await prisma.aiConversationState.findUnique({ where: { conversationId } });
+      if (!raced) throw new Error("Unable to initialize AI conversation state");
+      return raced;
+    });
 }
 
 async function sendAiText(ctx: AiInboundContext, text: string): Promise<{ id: string; whatsappMessageId: string | null }> {
@@ -69,7 +78,10 @@ async function sendAiText(ctx: AiInboundContext, text: string): Promise<{ id: st
       phoneNumberId: ctx.phoneNumberId,
       accessToken,
       graphVersion: appConfig.meta.graphVersion,
-      to: (await prisma.contact.findUnique({ where: { id: ctx.contactId }, select: { phone: true } }))?.phone ?? "",
+      to:
+        ctx.contact?.phone ??
+        (await prisma.contact.findUnique({ where: { id: ctx.contactId }, select: { phone: true } }))?.phone ??
+        "",
       body: text.slice(0, 4096),
     });
   } finally {
@@ -87,15 +99,14 @@ async function sendAiText(ctx: AiInboundContext, text: string): Promise<{ id: st
       messageTimestamp: new Date(),
     },
   });
-  await prisma.conversation.update({
-    where: { id: ctx.conversationId },
-    data: { lastMessageAt: new Date() },
-  });
   publish(ctx.tenantId, {
     type: "message.created",
     conversationId: ctx.conversationId,
     message: toEventMessage(saved),
   });
+  void prisma.conversation
+    .update({ where: { id: ctx.conversationId }, data: { lastMessageAt: new Date() } })
+    .catch(() => undefined);
   return { id: saved.id, whatsappMessageId };
 }
 
@@ -211,6 +222,15 @@ export async function handleInboundAi(ctx: AiInboundContext): Promise<AiOutcome>
   }
 
   const started = Date.now();
+  const refreshTyping = () => {
+    if (!ctx.inboundWamid) return;
+    showTypingIndicator({
+      conversationId: ctx.conversationId,
+      phoneNumberId: ctx.phoneNumberId,
+      encryptedAccessToken: ctx.encryptedAccessToken,
+      inboundWamid: ctx.inboundWamid,
+    });
+  };
   try {
     const [businessName, knowledge, offers, history] = await Promise.all([
       loadBusinessName(ctx.tenantId),
@@ -246,6 +266,7 @@ export async function handleInboundAi(ctx: AiInboundContext): Promise<AiOutcome>
       currentText: ctx.text,
     });
 
+    refreshTyping();
     const result = await chatCompletion({
       baseUrl: runtime.providerBaseUrl,
       apiKey: runtime.apiKey,
@@ -275,8 +296,11 @@ export async function handleInboundAi(ctx: AiInboundContext): Promise<AiOutcome>
     }
 
     if (runtime.replyDelayMs > 0) {
+      // Meta dismisses the typing indicator after ~25s; keep it alive while we wait.
+      refreshTyping();
       await sleep(Math.min(runtime.replyDelayMs, 5000));
     }
+    refreshTyping();
 
     // Re-check immediately before sending: a STOP or a human takeover may have
     // landed while the provider call was in flight.
@@ -293,29 +317,34 @@ export async function handleInboundAi(ctx: AiInboundContext): Promise<AiOutcome>
 
     const saved = await sendAiText(ctx, reply);
     const mergedFacts = mergeMemoryFacts(state.factsJson, parsed.memory);
-    let summary = state.summary;
-    let turns = state.turnsSinceSummary + 1;
-    if (turns >= 8) {
-      try {
-        summary = await summarizeConversation(runtime, history, ctx.text, reply, state.summary);
-        turns = 0;
-      } catch {
-        // Memory summarization is best-effort.
-      }
-    }
+    const turns = state.turnsSinceSummary + 1;
 
-    await prisma.aiConversationState.update({
-      where: { id: state.id },
-      data: {
-        lastAiReplyAt: new Date(),
-        factsJson: Object.keys(mergedFacts).length ? JSON.stringify(mergedFacts) : null,
-        summary,
-        turnsSinceSummary: turns,
-        consecutiveErrors: 0,
-        lastError: null,
-        ...(handoff ? { handoffAt: new Date() } : {}),
-      },
-    });
+    // Bookkeeping runs after the customer already has the reply: persist state,
+    // refresh the summary every 8 turns (best-effort), and log the response.
+    void prisma.aiConversationState
+      .update({
+        where: { id: state.id },
+        data: {
+          lastAiReplyAt: new Date(),
+          factsJson: Object.keys(mergedFacts).length ? JSON.stringify(mergedFacts) : null,
+          turnsSinceSummary: turns,
+          consecutiveErrors: 0,
+          lastError: null,
+          ...(handoff ? { handoffAt: new Date() } : {}),
+        },
+      })
+      .catch(() => undefined);
+
+    if (turns >= 8) {
+      void summarizeConversation(runtime, history, ctx.text, reply, state.summary)
+        .then((summary) =>
+          prisma.aiConversationState.update({
+            where: { id: state.id },
+            data: { summary, turnsSinceSummary: 0 },
+          }),
+        )
+        .catch(() => undefined);
+    }
 
     await logResponse({
       tenantId: ctx.tenantId,
@@ -379,6 +408,7 @@ export async function handleInboundAi(ctx: AiInboundContext): Promise<AiOutcome>
 
     return { attempted: true, replySent: fallbackSent, handoff: shouldHandoff, error: message };
   } finally {
+    if (ctx.inboundWamid) clearTypingIndicator(ctx.conversationId);
     await prisma.aiConversationState
       .update({ where: { id: state.id }, data: { processingAt: null } })
       .catch(() => undefined);

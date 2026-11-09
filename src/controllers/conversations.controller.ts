@@ -63,11 +63,8 @@ export async function sendMessageHandler(req: Request, res: Response): Promise<v
     return;
   }
   try {
-    sendSuccess(
-      res,
-      await sendConversationMessage(req.auth.tenantId, req.params.id, parsed.data),
-      201,
-    );
+    const result = await sendConversationMessage(req.auth.tenantId, req.params.id, parsed.data);
+    sendSuccess(res, result, 201);
   } catch (err) {
     if (err instanceof WhatsappServiceError) sendError(res, err.code, err.message, err.status);
     else sendError(res, "WHATSAPP_SEND_FAILED", "Unable to send WhatsApp message", 502);

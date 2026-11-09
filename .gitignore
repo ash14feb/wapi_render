@@ -5,3 +5,6 @@ dist/
 
 .vercel
 .env*
+/.vs/wapi/CopilotIndices/17.14.1431.25910
+/.vs/wapi/FileContentIndex
+/.vs/wapi/v17

@@ -67,6 +67,9 @@ function isDevelopment(): boolean {
   return (process.env.NODE_ENV ?? "development") !== "production";
 }
 
+const DNS_CACHE_MS = 5 * 60 * 1000;
+const dnsCache = new Map<string, { at: number; addresses: Array<{ address: string }> }>();
+
 /** Blocks localhost/private destinations to reduce SSRF risk on a tenant-supplied URL. */
 export async function assertSafeProviderUrl(rawUrl: string): Promise<URL> {
   let url: URL;
@@ -91,7 +94,20 @@ export async function assertSafeProviderUrl(rawUrl: string): Promise<URL> {
     if (!dev) throw new AiProviderError("AI_URL_BLOCKED", "AI provider URL is not allowed", 400);
   }
 
-  const addresses = await dns.lookup(host, { all: true }).catch(() => []);
+  // Hostnames are authoritative here (tenants can't repoint DNS at our DB);
+  // a short TTL keeps the hot reply path free of a lookup per message.
+  const cached = dnsCache.get(host);
+  const now = Date.now();
+  let addresses: Array<{ address: string }>;
+  if (cached && now - cached.at < DNS_CACHE_MS) {
+    addresses = cached.addresses;
+  } else {
+    addresses = await dns.lookup(host, { all: true }).catch(() => []);
+    if (addresses.length > 0) {
+      if (dnsCache.size > 200) dnsCache.clear();
+      dnsCache.set(host, { at: now, addresses });
+    }
+  }
   if (addresses.length === 0) {
     throw new AiProviderError("AI_URL_UNRESOLVED", "Unable to resolve the AI provider host", 400);
   }

@@ -426,6 +426,42 @@ export async function sendTextMessage(
   );
 }
 
+export interface MarkReadTypingParams {
+  phoneNumberId: string;
+  accessToken: string;
+  graphVersion: string;
+  messageId: string;
+}
+
+/**
+ * Marks an inbound message as read and shows the native WhatsApp typing
+ * indicator. The indicator dismisses when the reply is sent or after ~25s,
+ * so callers re-ping for slow replies. Best-effort: resolves false instead of
+ * throwing (older graph versions may not support typing_indicator).
+ */
+export async function markReadWithTyping(
+  params: MarkReadTypingParams,
+  fetchFn: FetchFn = fetch,
+): Promise<boolean> {
+  const version = sanitizeVersion(params.graphVersion);
+  const url = `https://graph.facebook.com/${version}/${encodeURIComponent(params.phoneNumberId)}/messages`;
+  try {
+    const res = await fetchFn(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${params.accessToken}` },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        status: "read",
+        message_id: params.messageId,
+        typing_indicator: { type: "text" },
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export interface SendChatMediaParams {
   phoneNumberId: string;
   accessToken: string;
