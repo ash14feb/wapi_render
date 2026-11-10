@@ -51,7 +51,7 @@ export async function syncTemplatesHandler(req: Request, res: Response): Promise
   try {
     sendSuccess(res, await syncTemplates(req.auth.tenantId, parsed.data.whatsappAccountId));
   } catch (err) {
-    if (err instanceof WhatsappServiceError) sendError(res, err.code, err.message, err.status);
+    if (err instanceof WhatsappServiceError) sendError(res, err.code, err.message, err.status, err.details);
     else sendError(res, "TEMPLATE_SYNC_FAILED", "Unable to sync templates", 502);
   }
 }
@@ -123,7 +123,12 @@ export async function createTemplateHandler(req: Request, res: Response): Promis
   }
   const parsed = createTemplateSchema.safeParse(req.body);
   if (!parsed.success) {
-    sendError(res, "VALIDATION_ERROR", "Invalid request body", 400, parsed.error.flatten());
+    const issues = parsed.error.issues.map((i) => ({
+      field: i.path.join(".") || "body",
+      message: i.message,
+    }));
+    const message = issues[0] ? `${issues[0].field}: ${issues[0].message}` : "Invalid request body";
+    sendError(res, "VALIDATION_ERROR", message, 400, { issues });
     return;
   }
   try {

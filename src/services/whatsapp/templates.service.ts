@@ -3,6 +3,7 @@ import { prisma } from "../../config/prisma";
 import { config } from "../../config/env";
 import { decryptToken } from "../../utils/crypto";
 import { countTemplateVars } from "../../utils/templates";
+import { readMetaError } from "../../utils/metaErrors";
 import { createMessageTemplate, fetchMessageTemplates } from "../meta/meta-client";
 import { WhatsappServiceError } from "./whatsapp.service";
 
@@ -65,10 +66,17 @@ export async function syncTemplates(
       graphVersion: config.meta.graphVersion,
     });
   } catch (err) {
+    const meta = readMetaError(err);
+    if (meta?.code === 100 && /Object with ID/i.test(meta.message)) {
+      meta.hint =
+        `The access token for this WhatsApp account cannot read WABA ${account.wabaId}. ` +
+        "Sign in with the number's Meta Business account again (or grant this app access to that WABA) and retry.";
+    }
     throw new WhatsappServiceError(
       "TEMPLATE_SYNC_FAILED",
-      err instanceof Error ? err.message : "Meta sync failed",
+      meta?.message ?? (err instanceof Error ? err.message : "Meta sync failed"),
       (err as { status?: number }).status ?? 502,
+      meta ?? undefined,
     );
   } finally {
     accessToken = "";
@@ -285,12 +293,14 @@ export async function createTemplate(tenantId: string, input: CreateTemplateInpu
       components,
     });
   } catch (err) {
+    // Surface Meta's own message (it names the offending field) plus the structured
+    // code/subcode/hint, so the UI can tell the user exactly what to fix.
+    const meta = readMetaError(err);
     throw new WhatsappServiceError(
       "TEMPLATE_CREATE_FAILED",
-      err instanceof Error ? err.message : "Meta create failed",
+      meta?.message ?? (err instanceof Error ? err.message : "Meta create failed"),
       (err as { status?: number }).status ?? 502,
-      // Full Meta body: code, error_subcode, error_data.blame_field, fbtrace_id
-      (err as { metaBody?: unknown }).metaBody ?? undefined,
+      meta ?? undefined,
     );
   } finally {
     accessToken = "";
