@@ -64,7 +64,7 @@ model WhatsappAccount {
   tenantId             String    @map("tenant_id")
   businessId           String?   @map("business_id")
   wabaId               String    @map("waba_id")
-  phoneNumberId        String    @map("phone_number_id")
+  phoneNumberId        String    @unique @map("phone_number_id")
   displayPhoneNumber   String?   @map("display_phone_number")
   businessName         String?   @map("business_name")
   encryptedAccessToken String    @map("encrypted_access_token") @db.Text

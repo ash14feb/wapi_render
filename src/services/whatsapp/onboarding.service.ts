@@ -47,6 +47,8 @@ export async function completeOnboarding(
 
   try {
     // Resolve WABA: explicit > single owned > error asking user to pick.
+    // When explicit, it must appear in the caller's owned WABAs — otherwise a
+    // tenant could claim a WABA (and its numbers) they don't actually own.
     let wabaId = input.wabaId;
     if (!wabaId) {
       if (!input.businessId) {
@@ -62,6 +64,18 @@ export async function completeOnboarding(
         );
       }
       wabaId = wabas[0].id;
+    } else {
+      if (!input.businessId) {
+        throw new WhatsappServiceError(
+          "BUSINESS_REQUIRED",
+          "businessId is required to verify ownership of the requested WABA",
+          400,
+        );
+      }
+      const owned = await listOwnedWabas(input.businessId, accessToken, config.meta.graphVersion);
+      if (!owned.some((w) => w.id === wabaId)) {
+        throw new WhatsappServiceError("WABA_NOT_OWNED", "The requested WABA is not owned by this business", 403);
+      }
     }
 
     await subscribeAppToWaba(wabaId, accessToken, config.meta.graphVersion).catch((err: Error) => {
@@ -69,11 +83,38 @@ export async function completeOnboarding(
     });
 
     const phones = await listWabaPhones(wabaId, accessToken, config.meta.graphVersion);
+    const available = new Set(phones.map((p) => p.id));
     const wanted = input.phoneNumberIds ?? phones.map((p) => p.id);
     if (wanted.length === 0) throw new WhatsappServiceError("NO_NUMBERS", "No phone numbers on this WABA", 404);
 
+    // Only numbers actually listed on this WABA may be connected. Without
+    // this, a client-supplied phoneNumberId would let a tenant register a
+    // number that belongs to someone else's WABA.
+    const foreign = wanted.filter((id) => !available.has(id));
+    if (foreign.length > 0) {
+      throw new WhatsappServiceError(
+        "PHONE_NUMBER_NOT_OWNED",
+        `Phone number(s) not on WABA ${wabaId}: ${foreign.join(", ")}`,
+        403,
+      );
+    }
+
     const accounts: OnboardedAccount[] = [];
     for (const phoneNumberId of wanted) {
+      // The number may already be connected elsewhere (e.g. a previous tenant).
+      // Connecting it here would silently rebind the inbound webhook routing.
+      const claimed = await prisma.whatsappAccount.findFirst({
+        where: { phoneNumberId, NOT: { tenantId } },
+        select: { id: true },
+      });
+      if (claimed) {
+        throw new WhatsappServiceError(
+          "PHONE_NUMBER_ALREADY_CONNECTED",
+          `Phone number ${phoneNumberId} is already connected to another workspace`,
+          409,
+        );
+      }
+
       await registerWabaPhone(phoneNumberId, accessToken, config.meta.graphVersion, input.pin).catch((err: Error) => {
         throw new WhatsappServiceError("REGISTER_FAILED", `${phoneNumberId}: ${err.message}`, 502);
       });
@@ -90,7 +131,7 @@ export async function completeOnboarding(
       }
 
       const saved = await prisma.whatsappAccount.upsert({
-        where: { tenantId_phoneNumberId: { tenantId, phoneNumberId } },
+        where: { phoneNumberId },
         update: {
           wabaId,
           encryptedAccessToken: encryptToken(accessToken),

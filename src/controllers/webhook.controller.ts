@@ -21,14 +21,16 @@ export function verifyWebhook(req: Request, res: Response): void {
  */
 export function receiveWebhook(req: Request, res: Response): void {
   const appSecret = process.env.META_APP_SECRET ?? "";
+  if (!appSecret) {
+    sendError(res, "SERVER_MISCONFIGURED", "META_APP_SECRET is not configured", 500);
+    return;
+  }
 
-  if (appSecret) {
-    const raw = (req as Request & { rawBody?: Buffer }).rawBody ?? JSON.stringify(req.body ?? {});
-    const signature = req.headers["x-hub-signature-256"] as string | undefined;
-    if (!verifyMetaSignature(raw, signature, appSecret)) {
-      sendError(res, "WEBHOOK_SIGNATURE_INVALID", "Invalid webhook signature", 403);
-      return;
-    }
+  const raw = (req as Request & { rawBody?: Buffer }).rawBody;
+  const signature = req.headers["x-hub-signature-256"] as string | undefined;
+  if (!raw || !verifyMetaSignature(raw, signature, appSecret)) {
+    sendError(res, "WEBHOOK_SIGNATURE_INVALID", "Invalid webhook signature", 403);
+    return;
   }
 
   const payload = req.body;
