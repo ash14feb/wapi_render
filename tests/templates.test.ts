@@ -192,6 +192,17 @@ describe("template media validation", () => {
     ).toBe(true);
   });
 
+  it("rejects a body that ends with a variable", () => {
+    const base = { name: "t", language: "en_US", category: "UTILITY" as const, examples: ["Sarah", "ORD-110"] };
+    const trailing = createTemplateSchema.safeParse({ ...base, bodyText: "Hi {{1}}, your bill is {{2}}" });
+    expect(trailing.success).toBe(false);
+    if (!trailing.success) {
+      expect(trailing.error.issues.some((i) => i.path[0] === "bodyText")).toBe(true);
+    }
+    expect(createTemplateSchema.safeParse({ ...base, bodyText: "Hi {{1}}, your bill is {{2}}." }).success).toBe(true);
+    expect(createTemplateSchema.safeParse({ ...base, bodyText: "Hi {{1}}, your bill is {{2}} thank you" }).success).toBe(true);
+  });
+
   it("allows AUTHENTICATION without custom body (Meta preset text is used)", () => {
     const r = createTemplateSchema.safeParse({ name: "otp_code", language: "en_US", category: "AUTHENTICATION" });
     expect(r.success).toBe(true);

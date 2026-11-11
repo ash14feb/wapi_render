@@ -8,6 +8,14 @@ export function countTemplateVars(text: string): number {
   return max;
 }
 
+/**
+ * True when the body ends with a {{n}} variable. Meta rejects bodies that
+ * terminate on a variable ("Invalid parameter"), so text must follow it.
+ */
+export function endsWithTemplateVar(text: string): boolean {
+  return /\{\{\d+\}\}\s*$/.test(text);
+}
+
 /** Render preview by substituting {{n}} with values[n-1]; unknown kept as-is. */
 export function renderTemplatePreview(text: string, values: string[]): string {
   return text.replace(/\{\{(\d+)\}\}/g, (match, n: string) => {

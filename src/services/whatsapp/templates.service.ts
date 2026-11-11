@@ -2,7 +2,7 @@ import { z } from "zod";
 import { prisma } from "../../config/prisma";
 import { config } from "../../config/env";
 import { decryptToken } from "../../utils/crypto";
-import { countTemplateVars } from "../../utils/templates";
+import { countTemplateVars, endsWithTemplateVar } from "../../utils/templates";
 import { readMetaError } from "../../utils/metaErrors";
 import { createMessageTemplate, fetchMessageTemplates } from "../meta/meta-client";
 import { WhatsappServiceError } from "./whatsapp.service";
@@ -147,6 +147,13 @@ export const createTemplateSchema = z.object({
   }
   if (!v.bodyText?.trim()) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "bodyText is required for UTILITY/MARKETING templates", path: ["bodyText"] });
+  }
+  if (v.bodyText && endsWithTemplateVar(v.bodyText)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "bodyText cannot end with a variable — add text after the last {{n}} (e.g. a trailing space is not enough)",
+      path: ["bodyText"],
+    });
   }
   const fmt = v.headerFormat ?? (v.headerText ? "TEXT" : undefined);
   if (fmt === "TEXT" && !v.headerText) {
