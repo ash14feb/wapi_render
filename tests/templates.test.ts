@@ -3,7 +3,7 @@ import { createMessageTemplate, fetchMessageTemplates, sendMediaMessage, uploadM
 import { normalizeTemplate } from "../src/services/whatsapp/templates.service";
 import { createTemplateSchema } from "../src/services/whatsapp/templates.service";
 import { sendTemplateSchema } from "../src/validators/whatsapp.validator";
-import { countTemplateVars, extractBodyText, renderTemplatePreview } from "../src/utils/templates";
+import { countTemplateVars, extractBodyText, renderTemplatePreview, validateTemplateContent } from "../src/utils/templates";
 
 describe("normalizeTemplate", () => {
   it("picks documented fields and uppercases status", () => {
@@ -106,6 +106,61 @@ describe("createMessageTemplate", () => {
         fetchFn as typeof fetch,
       ),
     ).rejects.toThrow("Invalid template name");
+  });
+});
+
+describe("validateTemplateContent", () => {
+  const ok = {
+    name: "order_update",
+    bodyText: "Hi {{1}}, your order {{2}} is ready for pickup today.",
+    examples: ["Sarah", "ORD-110"],
+  };
+
+  it("passes a well-formed body", () => {
+    expect(validateTemplateContent(ok)).toEqual([]);
+  });
+
+  it("rejects leading and trailing variables", () => {
+    expect(validateTemplateContent({ ...ok, bodyText: "{{1}}, your order is ready today.", examples: ["Sarah"] })).toContainEqual(
+      expect.objectContaining({ field: "bodyText", message: expect.stringContaining("start") }),
+    );
+    expect(validateTemplateContent({ ...ok, bodyText: "Hi {{1}}, your order is {{2}}", examples: ["Sarah", "ABC"] })).toContainEqual(
+      expect.objectContaining({ field: "bodyText", message: expect.stringContaining("end") }),
+    );
+    expect(validateTemplateContent({ ...ok, bodyText: "Hi {{1}}, your order is {{2}}.", examples: ["Sarah", "ABC"] })).not.toEqual([]);
+  });
+
+  it("rejects glued text and non-breaking spaces", () => {
+    expect(validateTemplateContent({ ...ok, bodyText: "Hi{{1}}, your order is ready today.", examples: ["Sarah"] }).length).toBeGreaterThan(0);
+    expect(validateTemplateContent({ ...ok, bodyText: "Hi\u00A0{{1}}, your order is ready today.", examples: ["Sarah"] }).length).toBeGreaterThan(0);
+  });
+
+  it("rejects non-sequential variable numbering", () => {
+    const gaps = validateTemplateContent({ ...ok, bodyText: "Hi {{1}}, order {{3}} is ready today.", examples: ["a", "b"] });
+    expect(gaps).toContainEqual(expect.objectContaining({ field: "bodyText", message: expect.stringContaining("sequentially") }));
+    expect(validateTemplateContent({ ...ok, bodyText: "Hi {{1}}, order {{2}} and {{2}} shipped today.", examples: ["a", "b"] })).toEqual([]);
+  });
+
+  it("requires examples to map 1:1 and be non-empty", () => {
+    expect(validateTemplateContent({ ...ok, examples: ["Sarah"] })).toContainEqual(
+      expect.objectContaining({ field: "examples" }),
+    );
+    expect(validateTemplateContent({ ...ok, examples: ["Sarah", "  "] })).toContainEqual(
+      expect.objectContaining({ field: "examples", message: expect.stringContaining("empty") }),
+    );
+  });
+
+  it("enforces naming and length limits", () => {
+    expect(validateTemplateContent({ ...ok, name: "Bad Name" })).toContainEqual(expect.objectContaining({ field: "name" }));
+    expect(validateTemplateContent({ ...ok, bodyText: `Hi {{1}} ${"x".repeat(1030)}.`, examples: ["a"] })).toContainEqual(
+      expect.objectContaining({ field: "bodyText", message: expect.stringContaining("1024") }),
+    );
+    expect(validateTemplateContent({ ...ok, footerText: "Order {{1}}" })).toContainEqual(
+      expect.objectContaining({ field: "footerText" }),
+    );
+    expect(validateTemplateContent({ ...ok, headerText: "Hello {{1}}" })).toContainEqual(
+      expect.objectContaining({ field: "headerText" }),
+    );
   });
 });
 

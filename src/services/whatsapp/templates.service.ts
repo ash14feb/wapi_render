@@ -2,7 +2,7 @@ import { z } from "zod";
 import { prisma } from "../../config/prisma";
 import { config } from "../../config/env";
 import { decryptToken } from "../../utils/crypto";
-import { countTemplateVars, endsWithTemplateVar } from "../../utils/templates";
+import { countTemplateVars, endsWithTemplateVar, validateTemplateContent } from "../../utils/templates";
 import { readMetaError } from "../../utils/metaErrors";
 import { createMessageTemplate, fetchMessageTemplates } from "../meta/meta-client";
 import { WhatsappServiceError } from "./whatsapp.service";
@@ -256,14 +256,22 @@ export async function createTemplate(tenantId: string, input: CreateTemplateInpu
     throw new WhatsappServiceError("WHATSAPP_ACCOUNT_NOT_FOUND", "No WhatsApp account found for tenant", 404);
   }
 
-  const varCount = countTemplateVars(input.bodyText ?? "");
-  const examples = input.examples ?? [];
-  if (input.category !== "AUTHENTICATION" && varCount > 0 && examples.length !== varCount) {
-    throw new WhatsappServiceError(
-      "VALIDATION_ERROR",
-      `Body has ${varCount} variable(s); provide exactly ${varCount} example value(s)`,
-      400,
-    );
+  if (input.category !== "AUTHENTICATION") {
+    const issues = validateTemplateContent({
+      name: input.name,
+      bodyText: input.bodyText,
+      headerText: input.headerText,
+      footerText: input.footerText,
+      examples: input.examples,
+    });
+    if (issues.length > 0) {
+      throw new WhatsappServiceError(
+        "VALIDATION_ERROR",
+        issues.map((i) => `${i.field}: ${i.message}`).join("; "),
+        400,
+        { issues },
+      );
+    }
   }
 
   // AUTHENTICATION templates use Meta's fixed preset text + OTP copy-code
